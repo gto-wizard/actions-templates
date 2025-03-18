@@ -1,0 +1,33 @@
+##########################################
+# Common Settings
+##########################################
+
+root = true
+
+# All Files
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+##########################################
+# File Extension Settings
+##########################################
+
+# JSON Files
+[*.{json,json5,webmanifest}]
+indent_size = 2
+tab_width = 2
+
+# YAML Files
+[*.{yml,yaml}]
+indent_size = 2
+tab_width = 2
+ij_yaml_keep_indents_on_empty_lines = false
+ij_yaml_keep_line_breaks = true
+ij_yaml_space_before_colon = false
+ij_yaml_spaces_within_braces = true
+ij_yaml_spaces_within_brackets = true

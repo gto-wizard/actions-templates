@@ -1,0 +1,59 @@
+name: Frontend - deployment
+
+on:
+  workflow_call:
+    inputs:
+      BUILD_RUNNER_LABEL:
+        type: string
+        default: ubuntu-latest
+        description: Routes jobs to runners with this label.
+      DEPLOY_RUNNER_LABEL:
+        type: string
+        default: ubuntu-latest
+        description: Routes jobs to runners with this label.
+      APP_NAME:
+        type: string
+        required: true
+        description: App name definition.
+      ENVIRONMENT:
+        type: string
+        required: true
+        description: Proper environment definition, i.e. (dev, prod, staging).
+      ARTIFACTS_DIR:
+        type: string
+        required: true
+        description: Directory where are stored artifacts from build process.
+      CLOUDFLARE_PROJECT_NAME:
+        type: string
+        description: Cloudflare Pages project name.
+      CLOUDFLARE_BRANCH:
+        type: string
+        description: Cloudflare Pages branch definition.
+
+jobs:
+  deployment:
+    name: 🎖️ Deployment
+    runs-on: ${{ inputs.DEPLOY_RUNNER_LABEL }}
+    environment: ${{ inputs.ENVIRONMENT }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # pin@v4.2.2
+
+      - name: Download artifact
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # pin@v4.1.9
+        with:
+          name: frontend-${{ inputs.APP_NAME }}-${{ inputs.ENVIRONMENT }}-${{ github.sha }}
+          path: ${{ inputs.ARTIFACTS_DIR }}
+
+      - name: Deploy Frontend to Cloudflare Pages
+        uses: cloudflare/wrangler-action@392082e81ffbcb9ebdde27400634aa004b35ea37 # pin@v3.14.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: >
+            pages deploy
+            --project-name "${{ inputs.CLOUDFLARE_PROJECT_NAME && inputs.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}"
+            --branch "${{ vars.CLOUDFLARE_BRANCH && vars.CLOUDFLARE_BRANCH || github.ref_name }}"
+            --commit-hash "${{ github.sha }}"
+            --commit-message "${{ github.event.head_commit.message }}"
+            --commit-dirty false
+            ${{ inputs.ARTIFACTS_DIR }}
