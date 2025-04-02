@@ -45,6 +45,12 @@ jobs:
           name: frontend-${{ inputs.APP_NAME }}-${{ inputs.ENVIRONMENT }}-${{ github.sha }}
           path: ${{ inputs.ARTIFACTS_DIR }}
 
+      - name: Format Commit Message
+         id: format-commit
+         run: |
+            COMMIT_MESSAGE="${{ github.event.head_commit.message }}"
+            echo "clean-output=${COMMIT_MESSAGE//$'\n'/'\n'}" >> $GITHUB_OUTPUT
+
       - name: Deploy Frontend to Cloudflare Pages
         uses: cloudflare/wrangler-action@392082e81ffbcb9ebdde27400634aa004b35ea37 # pin@v3.14.0
         with:
@@ -54,6 +60,6 @@ jobs:
             --project-name "${{ inputs.CLOUDFLARE_PROJECT_NAME && inputs.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}"
             --branch "${{ vars.CLOUDFLARE_BRANCH && vars.CLOUDFLARE_BRANCH || github.ref_name }}"
             --commit-hash "${{ github.sha }}"
-            --commit-message "${{ github.event.head_commit.message }}"
+            --commit-message "${{ steps.format-commit.outputs.clean-output }}"
             --commit-dirty false
             ${{ inputs.ARTIFACTS_DIR }}
