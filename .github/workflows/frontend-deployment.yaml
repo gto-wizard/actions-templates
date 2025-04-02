@@ -46,10 +46,10 @@ jobs:
           path: ${{ inputs.ARTIFACTS_DIR }}
 
       - name: Format Commit Message
-         id: format-commit
-         run: |
-            COMMIT_MESSAGE="${{ github.event.head_commit.message }}"
-            echo "clean-output=${COMMIT_MESSAGE//$'\n'/'\n'}" >> $GITHUB_OUTPUT
+        id: format-commit
+        run: |
+          COMMIT_MESSAGE="${{ github.event.head_commit.message }}"
+          echo "clean-output=${COMMIT_MESSAGE//$'\n'/'\n'}" >> $GITHUB_OUTPUT
 
       - name: Deploy Frontend to Cloudflare Pages
         uses: cloudflare/wrangler-action@392082e81ffbcb9ebdde27400634aa004b35ea37 # pin@v3.14.0
