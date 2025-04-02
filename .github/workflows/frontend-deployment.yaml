@@ -23,16 +23,16 @@ on:
         type: string
         required: true
         description: Directory where are stored artifacts from build process.
-      CLOUDFLARE_API_TOKEN:
-        type: string
-        required: true
-        description: Cloudflare API token for Pages deployment
       CLOUDFLARE_PROJECT_NAME:
         type: string
         description: Cloudflare Pages project name.
       CLOUDFLARE_BRANCH:
         type: string
         description: Cloudflare Pages branch definition.
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+        description: Cloudflare API token for Pages deployment      
 
 jobs:
   deployment:
@@ -52,7 +52,7 @@ jobs:
       - name: Deploy Frontend to Cloudflare Pages
         uses: cloudflare/wrangler-action@392082e81ffbcb9ebdde27400634aa004b35ea37 # pin@v3.14.0
         with:
-          apiToken: ${{ inputs.CLOUDFLARE_API_TOKEN }}
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           command: >
             pages deploy
