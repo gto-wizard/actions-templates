@@ -46,7 +46,7 @@ jobs:
           path: ${{ inputs.ARTIFACTS_DIR }}
 
       - name: Format Commit Message
-         id: clean_message
+         id: format-commit
          run: |
             COMMIT_MESSAGE="${{ github.event.head_commit.message }}"
             echo "clean-output=${COMMIT_MESSAGE//$'\n'/'\n'}" >> $GITHUB_OUTPUT
@@ -60,6 +60,6 @@ jobs:
             --project-name "${{ inputs.CLOUDFLARE_PROJECT_NAME && inputs.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}"
             --branch "${{ vars.CLOUDFLARE_BRANCH && vars.CLOUDFLARE_BRANCH || github.ref_name }}"
             --commit-hash "${{ github.sha }}"
-            --commit-message "${{ steps.clean_message.outputs.clean-output }}"
+            --commit-message "${{ steps.format-commit.outputs.clean-output }}"
             --commit-dirty false
             ${{ inputs.ARTIFACTS_DIR }}
