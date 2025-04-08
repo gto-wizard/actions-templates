@@ -1,0 +1,186 @@
+# This workflow builds a multi-arch Docker image using GitHub Actions and separated Github Runners with native support for ARM64 and AMD64 architectures, without using QEMU emulation.
+# It uses Docker Buildx to build and push the image.
+name: Multi-arch-build
+
+on:
+  workflow_call:
+    inputs:
+      IMAGE_NAME:
+        required: true
+        type: string
+        description: Name for the image
+      DOCKER_CONTEXT:
+        type: string
+        default: "."
+        description: Build's context is the set of files located in the specified PATH or URL
+      DOCKER_FILE:
+        type: string
+        default: "./Dockerfile"
+        description: Path to the Dockerfile
+      DOCKER_BUILD_ARGS:
+        type: string
+        description: List of build-time variables
+            
+permissions:
+  # Global permissions for the workflow, which can be overridden at the job level
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' || github.sha }}"
+  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
+
+jobs:
+  build:
+    name: Build Docker image for ${{ matrix.platform }}    
+    runs-on: ${{ matrix.platform == 'linux/amd64' && '4core-16gb' || matrix.platform == 'linux/arm64' && 'ARM64' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - name: Prepare environment for current platform 
+        id: prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Docker Context for Buildx
+        id: buildx-context
+        run: |
+          docker context create builders
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+        with:
+          endpoint: builders
+          platforms: ${{ matrix.platform }}
+
+      - name: Configure AWS credentials for ECR
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # pin@v4.1.0
+        with:
+          role-to-assume: "arn:aws:iam::${{ vars.AWS_CICD_ACCOUNT }}:role/github-actions"
+          aws-region: ${{ vars.AWS_CICD_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # pin@v2.0.1
+
+      - name: Buildcache docker meta
+        id: cache-meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # pin@v5.7.0
+        with:
+            images: ${{ steps.login-ecr.outputs.registry }}/cache
+            tags: |
+                type=raw,value=${{ inputs.IMAGE_NAME }}-${{ matrix.platform }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}        
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        env:
+          DOCKER_BUILDKIT: 1
+        with:
+          context: ${{ inputs.DOCKER_CONTEXT }}
+          file: ${{ inputs.DOCKER_FILE }}
+          build-args: ${{ inputs.DOCKER_BUILD_ARGS }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          outputs: type=image,name=${{ steps.login-ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
+          cache-from: ref=${{ steps.cache-meta.outputs.tags }},type=registry
+          cache-to: ${{ github.actor != 'dependabot[bot]' && format('type=registry,ref={0},mode=max,image-manifest=true,oci-mediatypes=true', steps.cache-meta.outputs.tags) || '' }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest    
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+
+  merge:
+    name: Merge Docker manifests
+    runs-on: ubuntu-latest
+    needs:
+      - build
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+        with:
+          driver-opts: |
+            network=host
+
+      - name: Configure AWS credentials for ECR
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # pin@v4.1.0
+        with:
+          role-to-assume: "arn:aws:iam::${{ vars.AWS_CICD_ACCOUNT }}:role/github-actions"
+          aws-region: ${{ vars.AWS_CICD_REGION }}
+    
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # pin@v2.0.1
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}
+          annotations: |
+            type=org.opencontainers.image.description,value=${{ github.event.repository.description || 'No description provided' }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}      
+
+      - name: Get execution timestamp with RFC3339 format
+        id: timestamp
+        run: |
+          echo "timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+
+      - name: Create manifest list and pushs
+        working-directory: /tmp/digests
+        id: manifest-annotate
+        continue-on-error: true
+        run: |
+              docker buildx imagetools create \
+                $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+                --annotation='index:org.opencontainers.image.description=${{ github.event.repository.description }}' \
+                --annotation='index:org.opencontainers.image.created=${{ steps.timestamp.outputs.timestamp }}' \
+                --annotation='index:org.opencontainers.image.url=${{ github.event.repository.url }}' \
+                --annotation='index:org.opencontainers.image.source=${{ github.event.repository.url }}' \
+                $(printf '${{ steps.login-ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Create manifest list and push without annotations
+        if: steps.manifest-annotate.outcome == 'failure'
+        working-directory: /tmp/digests
+        run: |
+              docker buildx imagetools create  $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+                $(printf '${{ steps.login-ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect image
+        id: inspect
+        run: |
+          docker buildx imagetools inspect '${{ steps.login-ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}:${{ steps.meta.outputs.version }}'
