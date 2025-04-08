@@ -30,6 +30,18 @@ on:
         required: true
         type: string
         description: Custom ARM64 CI runner label
+      CHECKOUT_2ND_REPO_NAME:
+        type: string
+        description: Definition of additional git repository for checkout
+      CHECKOUT_2ND_REPO_PATH:
+        type: string
+        description: Custom destination path for additional repository
+      CHECKOUT_2ND_REPO_SUBMODULES:
+        type: string
+        description: Additional repository submodule trigger
+    secrets:
+      CHECKOUT_2ND_REPO_SSH_KEY:
+        description: Additional repository ssh-key definition
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' || github.sha }}"
@@ -57,6 +69,15 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Checkout additional repository
+        if: ${{ inputs.CHECKOUT_2ND_REPO_NAME != '' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # pin@v4.2.2
+        with:
+          repository: ${{ inputs.CHECKOUT_2ND_REPO_NAME }}
+          path: ${{ inputs.CHECKOUT_2ND_REPO_PATH }}
+          ssh-key: ${{ secrets.CHECKOUT_2ND_REPO_SSH_KEY }}
+          submodules: ${{ inputs.CHECKOUT_2ND_REPO_SUBMODULES }}
 
       - name: Set up Docker Context for Buildx
         id: buildx-context
