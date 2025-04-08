@@ -20,10 +20,6 @@ on:
       DOCKER_BUILD_ARGS:
         type: string
         description: List of build-time variables
-            
-permissions:
-  # Global permissions for the workflow, which can be overridden at the job level
-  contents: read
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' || github.sha }}"
@@ -113,7 +109,6 @@ jobs:
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
-
 
   merge:
     name: Merge Docker manifests
