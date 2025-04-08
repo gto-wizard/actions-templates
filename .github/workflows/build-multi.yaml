@@ -43,10 +43,6 @@ on:
       CHECKOUT_2ND_REPO_SSH_KEY:
         description: Additional repository ssh-key definition
 
-concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' || github.sha }}"
-  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
-
 jobs:
   build:
     name: 🐋 Backend build - ${{ matrix.platform }}
