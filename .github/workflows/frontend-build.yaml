@@ -74,8 +74,7 @@ jobs:
         run: |
           ARCH="${{ runner.arch }}"
           ARCH="${ARCH/X64/amd64}"; ARCH="${ARCH/ARM64/arm64}"
-          mkdir -p ~/.local/bin
-          wget -q -O ~/.local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${ARCH}
+          curl -sL --create-dirs -o ~/.local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${ARCH}
           chmod +x ~/.local/bin/yq
           echo "${{ inputs.BUILD_VARIABLES }}" | yq -r 'to_entries | .[] | "\(.key)=\(.value)"' >> $GITHUB_ENV
 
