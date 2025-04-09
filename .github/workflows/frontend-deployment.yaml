@@ -66,6 +66,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: ${{ env.WRANGLER_RELEASE }}
+          packageManager: npm
           command: >
             pages deploy
             --project-name "${{ inputs.CLOUDFLARE_PROJECT_NAME && inputs.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}"
