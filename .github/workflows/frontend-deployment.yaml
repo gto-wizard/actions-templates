@@ -40,7 +40,7 @@ jobs:
     runs-on: ${{ inputs.DEPLOY_RUNNER_LABEL }}
     environment: ${{ inputs.ENVIRONMENT }}
     env:
-      WRANGLER_RELEASE: 3.90.0
+      WRANGLER_RELEASE: 4.9.1
       NODE_RELEASE: 20
     steps:
       - name: Checkout repository
