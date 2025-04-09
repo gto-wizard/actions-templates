@@ -32,16 +32,27 @@ on:
     secrets:
       CLOUDFLARE_API_TOKEN:
         required: true
-        description: Cloudflare API token for Pages deployment      
+        description: Cloudflare API token for Pages deployment
 
 jobs:
   deployment:
     name: 🎖️ Deployment
     runs-on: ${{ inputs.DEPLOY_RUNNER_LABEL }}
     environment: ${{ inputs.ENVIRONMENT }}
+    env:
+      WRANGLER_RELEASE: 3.90.0
+      NODE_RELEASE: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # pin@v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # pin@v4.2.0
+        with:
+          node-version: ${{ env.NODE_RELEASE }}
+
+      - name: Install wrangler
+        run: npm install -g wrangler@${{ env.WRANGLER_RELEASE }}
 
       - name: Download artifact
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # pin@v4.1.9
@@ -54,6 +65,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: ${{ env.WRANGLER_RELEASE }}
           command: >
             pages deploy
             --project-name "${{ inputs.CLOUDFLARE_PROJECT_NAME && inputs.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}"
