@@ -70,10 +70,13 @@ jobs:
         run: npm install
 
       - name: Export Build Variables
-        uses: mikefarah/yq@8bf425b4d1344db7cd469a8d10a390876e0c77fd # pin@v4.45.1
         if: inputs.BUILD_VARIABLES != ''
-        with:
-          cmd: echo "${{ inputs.BUILD_VARIABLES }}" | yq -r 'to_entries | .[] | "\(.key)=\(.value)"' >> $GITHUB_ENV
+        run: |
+          ARCH="${{ runner.arch }}"
+          ARCH="${ARCH/X64/amd64}"; ARCH="${ARCH/ARM64/arm64}"
+          curl -sL --create-dirs -o ~/.local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${ARCH}
+          chmod +x ~/.local/bin/yq
+          echo "${{ inputs.BUILD_VARIABLES }}" | yq -r 'to_entries | .[] | "\(.key)=\(.value)"' >> $GITHUB_ENV
 
       - name: Build project
         working-directory: ${{ inputs.WORKING_DIR }}
