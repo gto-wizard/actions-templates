@@ -44,6 +44,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
+    outputs:
+      ecr-registry: ${{ steps.login-ecr.outputs.registry}}
 
     steps:
       - name: Checkout repository
