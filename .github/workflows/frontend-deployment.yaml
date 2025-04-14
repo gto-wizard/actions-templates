@@ -32,7 +32,6 @@ on:
     outputs:
       url:
         value: ${{ jobs.deployment.outputs.url }}
-        type: string
         description: "Preview URL for the deployment"
     secrets:
       CLOUDFLARE_API_TOKEN:
