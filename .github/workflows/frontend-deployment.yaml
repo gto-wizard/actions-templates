@@ -18,7 +18,11 @@ on:
       ENVIRONMENT:
         type: string
         required: true
-        description: Proper environment definition, i.e. (dev, prod, staging).
+        description: Build environment definition, i.e. (dev, prod, staging).
+      DEPLOY_ENV_NAME:
+        type: string
+        required: true
+        description: Deploy environment name, i.e. (preview, prod, staging).
       ARTIFACTS_DIR:
         type: string
         required: true
@@ -38,7 +42,9 @@ jobs:
   deployment:
     name: 🎖️ Deployment
     runs-on: ${{ inputs.DEPLOY_RUNNER_LABEL }}
-    environment: ${{ inputs.ENVIRONMENT }}
+    environment:
+      name: ${{ inputs.DEPLOY_ENV_NAME }}
+      url: ${{ steps.deploy.outputs.pages-deployment-alias-url || steps.deploy.outputs.deployment-url }}
     env:
       WRANGLER_RELEASE: 4.9.1
       NODE_RELEASE: 20
@@ -62,6 +68,7 @@ jobs:
 
       - name: Deploy Frontend to Cloudflare Pages
         uses: cloudflare/wrangler-action@392082e81ffbcb9ebdde27400634aa004b35ea37 # pin@v3.14.0
+        id: deploy
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -69,7 +76,7 @@ jobs:
           packageManager: npm
           command: >
             pages deploy
-            --project-name "${{ inputs.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}"
-            --branch "${{ vars.CLOUDFLARE_BRANCH && vars.CLOUDFLARE_BRANCH || github.ref_name }}"
+            --project-name "${{ inputs.CLOUDFLARE_PROJECT_NAME && inputs.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}"
+            --branch "${{ inputs.CLOUDFLARE_BRANCH || vars.CLOUDFLARE_BRANCH || github.ref_name }}"
             --commit-dirty false
             ${{ inputs.ARTIFACTS_DIR }}
