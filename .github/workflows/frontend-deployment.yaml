@@ -31,7 +31,9 @@ on:
         description: Cloudflare Pages branch definition.
     outputs:
       url:
-        value: '${{ jobs.deployment.outputs.url }}'
+        value: ${{ jobs.deployment.outputs.url }}
+        type: string
+        description: "Preview URL for the deployment"
     secrets:
       CLOUDFLARE_API_TOKEN:
         required: true
