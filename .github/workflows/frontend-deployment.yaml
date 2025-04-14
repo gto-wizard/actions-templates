@@ -29,6 +29,9 @@ on:
       CLOUDFLARE_BRANCH:
         type: string
         description: Cloudflare Pages branch definition.
+    outputs:
+      url:
+        value: '${{ jobs.deployment.outputs.url }}'
     secrets:
       CLOUDFLARE_API_TOKEN:
         required: true
