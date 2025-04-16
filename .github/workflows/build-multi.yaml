@@ -60,6 +60,8 @@ jobs:
       id-token: write
       contents: write
       pull-requests: read
+    outputs:
+      ecr-registry: ${{ steps.ecr.outputs.registry}}
     steps:
       - name: Set environment variables for current platform
         run: |
