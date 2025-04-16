@@ -45,6 +45,10 @@ on:
     secrets:
       CHECKOUT_2ND_REPO_SSH_KEY:
         description: Additional repository ssh-key definition
+    outputs:
+      ecr-registry:
+        description: ECR registry variable
+        value: ${{ jobs.build.outputs.ecr-registry }}
 
 jobs:
   build:
