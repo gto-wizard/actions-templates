@@ -22,6 +22,10 @@ on:
         type: string
         default: "./Dockerfile"
         description: Path to the Dockerfile
+      DOCKER_PUSH:
+        type: boolean
+        default: true
+        description: Push the build result to registry
       DOCKER_BUILD_ARGS:
         type: string
         description: List of build-time variables
@@ -131,7 +135,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
-          outputs: type=image,name=${{ steps.ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
+          outputs: type=image,name=${{ steps.ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }},push-by-digest=${{ inputs.DOCKER_PUSH }},name-canonical=true,push=${{ inputs.DOCKER_PUSH }},oci-mediatypes=true
           cache-from: ref=${{ steps.cache-meta.outputs.tags }},type=registry
           cache-to: ${{ github.actor != 'dependabot[bot]' && format('type=registry,ref={0},mode=max,image-manifest=true,oci-mediatypes=true', steps.cache-meta.outputs.tags) || '' }}
 
@@ -151,6 +155,7 @@ jobs:
 
   merge:
     name: 🥨 Merge manifests
+    if: ${{ inputs.DOCKER_PUSH }}
     runs-on: ubuntu-latest
     needs:
       - build
