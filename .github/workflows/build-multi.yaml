@@ -125,6 +125,14 @@ jobs:
         with:
           images: ${{ steps.ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}
 
+      - name: Set up combined Docker build args
+        id: set-args
+        run: |
+          echo "BUILD_ARGS<<EOF" >> $GITHUB_OUTPUT
+          echo "${{ inputs.DOCKER_BUILD_ARGS }}" >> $GITHUB_OUTPUT
+          echo "${{ secrets.DOCKER_BUILD_SECRET_ARGS }}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
@@ -133,7 +141,7 @@ jobs:
         with:
           context: ${{ inputs.DOCKER_CONTEXT }}
           file: ${{ inputs.DOCKER_FILE }}
-          build-args: ${{ inputs.DOCKER_BUILD_ARGS }}
+          build-args: ${{ steps.set-args.outputs.BUILD_ARGS }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
