@@ -30,6 +30,8 @@ on:
         type: string
         default: ubuntu-latest
     secrets:
+      DOCKER_BUILD_ARGS:
+        description: Additional Docker build arguments considered classified
       DOCKERHUB_USER:
         required: true
         description: Username for company DockerHub account
@@ -94,6 +96,14 @@ jobs:
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
 
+      - name: Set up combined Docker build args
+        id: set-args
+        run: |
+          echo "BUILD_ARGS<<EOF" >> $GITHUB_OUTPUT
+          echo "${{ inputs.DOCKER_BUILD_ARGS }}" >> $GITHUB_OUTPUT
+          echo "${{ secrets.DOCKER_BUILD_ARGS }}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         id: build-and-push
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # pin@v6.15.0
@@ -106,4 +116,4 @@ jobs:
           cache-from: ref=${{ steps.cache-meta.outputs.tags }},type=registry
           cache-to: ${{ github.actor != 'dependabot[bot]' && format('type=registry,ref={0},mode=max,image-manifest=true,oci-mediatypes=true', steps.cache-meta.outputs.tags) || '' }}
           platforms: ${{ inputs.DOCKER_PLATFORMS }}
-          build-args: ${{ inputs.DOCKER_BUILD_ARGS }}
+          build-args: ${{ steps.set-args.outputs.BUILD_ARGS }}
