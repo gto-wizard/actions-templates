@@ -49,6 +49,8 @@ on:
     secrets:
       CHECKOUT_2ND_REPO_SSH_KEY:
         description: Additional repository ssh-key definition
+      DOCKER_BUILD_SECRET_ARGS:
+        description: Additional Docker build arguments considered classified
     outputs:
       ecr-registry:
         description: ECR registry variable
