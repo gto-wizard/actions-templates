@@ -49,7 +49,7 @@ on:
     secrets:
       CHECKOUT_2ND_REPO_SSH_KEY:
         description: Additional repository ssh-key definition
-      DOCKER_BUILD_SECRET_ARGS:
+      DOCKER_BUILD_ARGS:
         description: Additional Docker build arguments considered classified
     outputs:
       ecr-registry:
@@ -130,7 +130,7 @@ jobs:
         run: |
           echo "BUILD_ARGS<<EOF" >> $GITHUB_OUTPUT
           echo "${{ inputs.DOCKER_BUILD_ARGS }}" >> $GITHUB_OUTPUT
-          echo "${{ secrets.DOCKER_BUILD_SECRET_ARGS }}" >> $GITHUB_OUTPUT
+          echo "${{ secrets.DOCKER_BUILD_ARGS }}" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Build and push by digest
