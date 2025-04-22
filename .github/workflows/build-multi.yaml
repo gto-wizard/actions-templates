@@ -14,6 +14,9 @@ on:
         required: true
         type: string
         description: Name for the image
+      IMAGE_TAG_PREFIX:
+        type: string
+        description: Custom image tag prefix
       DOCKER_CONTEXT:
         type: string
         default: "."
@@ -205,7 +208,7 @@ jobs:
           annotations: |
             type=org.opencontainers.image.description,value=${{ github.event.repository.description || 'No description provided' }}
           tags: |
-            type=sha,prefix=
+            type=sha,prefix=${{ env.IMAGE_TAG_PREFIX }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Get execution timestamp with RFC3339 format

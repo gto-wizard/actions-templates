@@ -7,6 +7,9 @@ on:
         required: true
         type: string
         description: name for the image
+      IMAGE_TAG_PREFIX:
+        type: string
+        description: Custom image tag prefix
       DOCKER_PLATFORMS:
         type: string
         default: "linux/amd64,linux/arm64"
@@ -93,7 +96,7 @@ jobs:
         with:
           images: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}
           tags: |
-            type=sha,prefix=
+            type=sha,prefix=${{ env.IMAGE_TAG_PREFIX }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Set up combined Docker build args
