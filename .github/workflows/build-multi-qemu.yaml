@@ -96,7 +96,7 @@ jobs:
         with:
           images: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}
           tags: |
-            type=sha,prefix=${{ env.IMAGE_TAG_PREFIX }}
+            type=sha,prefix=${{ inputs.IMAGE_TAG_PREFIX }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Set up combined Docker build args
