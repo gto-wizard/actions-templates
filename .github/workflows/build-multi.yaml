@@ -43,6 +43,9 @@ on:
       CHECKOUT_2ND_REPO_PATH:
         type: string
         description: Custom destination path for additional repository
+      CHECKOUT_2ND_REPO_REF:
+        type: string
+        description: The branch, tag or SHA to checkout additional repository
       CHECKOUT_2ND_REPO_SUBMODULES:
         type: string
         description: Additional repository submodule trigger
@@ -87,6 +90,7 @@ jobs:
         with:
           repository: ${{ inputs.CHECKOUT_2ND_REPO_NAME }}
           path: ${{ inputs.CHECKOUT_2ND_REPO_PATH }}
+          ref: ${{ inputs.CHECKOUT_2ND_REPO_REF }}
           ssh-key: ${{ secrets.CHECKOUT_2ND_REPO_SSH_KEY }}
           submodules: ${{ inputs.CHECKOUT_2ND_REPO_SUBMODULES }}
 
