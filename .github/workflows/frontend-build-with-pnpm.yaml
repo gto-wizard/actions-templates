@@ -15,10 +15,6 @@ on:
         type: number
         required: true
         description: Node.JS version specification.
-      WORKING_DIR:
-        type: string
-        default: "."
-        description: Working directory definition.
       APP_NAME:
         type: string
         required: true
@@ -74,7 +70,6 @@ jobs:
           echo "${{ inputs.BUILD_VARIABLES }}" | yq -r 'to_entries | .[] | "\(.key)=\(.value)"' >> $GITHUB_ENV
 
       - name: Build project
-        # working-directory: ${{ inputs.WORKING_DIR }}
         run: pnpm nx run ${{ inputs.APP_NAME }}:build
 
       - name: Upload artifact
