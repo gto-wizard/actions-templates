@@ -47,8 +47,12 @@ jobs:
           curl -sL --create-dirs  -o ~/.local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/${{ inputs.ARGOCD_VERSION }}/argocd-linux-amd64
           chmod +x ~/.local/bin/argocd
 
+      - run: |
+          echo "Token length: $(echo "${{ secrets.ARGOCD_AUTH_TOKEN }}" | wc -c)"
+          argocd account get-user-info --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }}
+
       - name: Run argocd sync
-        run: argocd --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" --server "${{ inputs.ARGOCD_SERVER_URL}}" --grpc-web app sync "${{ inputs.ARGOCD_APP_NAME }}"
+        run: argocd --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} --server "${{ inputs.ARGOCD_SERVER_URL}}" --grpc-web app sync "${{ inputs.ARGOCD_APP_NAME }}"
 
       - name: Run argocd wait
-        run: argocd --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" --server "${{ inputs.ARGOCD_SERVER_URL}}" --grpc-web app wait --timeout 60 "${{ inputs.ARGOCD_APP_NAME }}"
+        run: argocd --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} --server "${{ inputs.ARGOCD_SERVER_URL}}" --grpc-web app wait --timeout 60 "${{ inputs.ARGOCD_APP_NAME }}"
