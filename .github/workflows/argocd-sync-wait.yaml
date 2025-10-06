@@ -47,7 +47,7 @@ jobs:
           chmod +x ~/.local/bin/argocd
 
       - name: Run argocd sync
-        run: argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" --server "${{ inputs.ARGOCD_SERVER_URL}}" --grpc-web app sync "${{ inputs.ARGOCD_APP_NAME }}"
+        run: argocd --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" --server "${{ inputs.ARGOCD_SERVER_URL}}" --grpc-web app sync "${{ inputs.ARGOCD_APP_NAME }}"
 
       - name: Run argocd wait
-        run: argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" --server "${{ inputs.ARGOCD_SERVER_URL}}" --grpc-web app wait --timeout 60 "${{ inputs.ARGOCD_APP_NAME }}"
+        run: argocd --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" --server "${{ inputs.ARGOCD_SERVER_URL}}" --grpc-web app wait --timeout 60 "${{ inputs.ARGOCD_APP_NAME }}"
