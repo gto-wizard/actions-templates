@@ -25,6 +25,7 @@ on:
         description: Timeout in seconds for argocd wait
     secrets:
       ARGOCD_AUTH_TOKEN:
+        required: true
         description: Argocd cli user auth token
 
 jobs:
