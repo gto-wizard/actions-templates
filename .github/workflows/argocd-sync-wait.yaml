@@ -49,7 +49,7 @@ jobs:
 
       - run: |
           echo "Token length: $(echo "${{ secrets.ARGOCD_AUTH_TOKEN }}" | wc -c)"
-          argocd account get-user-info --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          argocd account get-user-info --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} --server "${{ inputs.ARGOCD_SERVER_URL}}" --grpc-web
 
       - name: Run argocd sync
         run: argocd --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} --server "${{ inputs.ARGOCD_SERVER_URL}}" --grpc-web app sync "${{ inputs.ARGOCD_APP_NAME }}"
