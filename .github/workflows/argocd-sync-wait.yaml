@@ -43,7 +43,7 @@ jobs:
           # for latest version
           # ARGOCD_VERSION=$(curl --silent "https://api.github.com/repos/argoproj/argo-cd/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"s]+)".*/\1/' )
 
-          curl -sL --create-dirs  -o ~/.local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/${{ inputs.ARGOCD_VERSION}/argocd-linux-amd64
+          curl -sL --create-dirs  -o ~/.local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/${{ inputs.ARGOCD_VERSION }}/argocd-linux-amd64
           chmod +x ~/.local/bin/argocd
 
       - name: Run argocd sync
