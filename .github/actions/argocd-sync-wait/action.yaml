@@ -1,0 +1,41 @@
+name: 🗘 Argocd sync and wait
+inputs:
+  ARGOCD_SERVER_URL:
+    type: string
+    default: argocd.services.gtowiz.com
+    description: Argocd server endpoint url.
+  ARGOCD_VERSION:
+    type: string
+    default: v2.14.11
+    description: argocd cli version.
+  ARGOCD_APP_NAME:
+    type: string
+    required: true
+    description: Argocd app name.
+  WAIT_TIMEOUT_SECONDS:
+    type: number
+    default: 300
+    description: Timeout in seconds for argocd wait
+  ARGOCD_AUTH_TOKEN:
+    required: true
+    description: Argocd cli user auth token
+runs:
+  using: 'composite'
+
+  steps:
+  - name: Download argocd binary
+    shell: bash
+    run: |
+      # for latest version
+      # ARGOCD_VERSION=$(curl --silent "https://api.github.com/repos/argoproj/argo-cd/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"s]+)".*/\1/' )
+
+      curl -sL --create-dirs  -o ~/.local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/${{ inputs.ARGOCD_VERSION }}/argocd-linux-amd64
+      chmod +x ~/.local/bin/argocd
+
+  - name: Run argocd sync
+    shell: bash
+    run: argocd --auth-token ${{ inputs.ARGOCD_AUTH_TOKEN }} --server ${{ inputs.ARGOCD_SERVER_URL}} --grpc-web app sync "${{ inputs.ARGOCD_APP_NAME }}"
+
+  - name: Run argocd wait
+    shell: bash
+    run: argocd --auth-token ${{ inputs.ARGOCD_AUTH_TOKEN }} --server ${{ inputs.ARGOCD_SERVER_URL}} --grpc-web app wait --timeout ${{ inputs.WAIT_TIMEOUT_SECONDS }} "${{ inputs.ARGOCD_APP_NAME }}"
