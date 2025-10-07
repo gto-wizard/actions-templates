@@ -7,10 +7,6 @@ on:
         type: string
         default: ubuntu-latest
         description: Routes jobs to runners with this label.
-      DEPLOY_RUNNER_LABEL:
-        type: string
-        default: ubuntu-latest
-        description: Routes jobs to runners with this label.
       NODEJS_VERSION:
         type: number
         required: true
@@ -23,10 +19,6 @@ on:
         type: string
         required: true
         description: Proper environment definition, i.e. (dev, prod, staging).
-      BUILD_SCRIPT:
-        type: string
-        default: build
-        description: Custom build script definition.
       BUILD_VARIABLES:
         type: string
         description: Variables necessary for build process.
