@@ -1,0 +1,72 @@
+name: Frontend - build (pnpm)
+
+on:
+  workflow_call:
+    inputs:
+      BUILD_RUNNER_LABEL:
+        type: string
+        default: ubuntu-latest
+        description: Routes jobs to runners with this label.
+      NODEJS_VERSION:
+        type: number
+        required: true
+        description: Node.JS version specification.
+      APP_NAME:
+        type: string
+        required: true
+        description: App name definition.
+      ENVIRONMENT:
+        type: string
+        required: true
+        description: Proper environment definition, i.e. (dev, prod, staging).
+      BUILD_VARIABLES:
+        type: string
+        description: Variables necessary for build process.
+      ARTIFACTS_DIR:
+        type: string
+        required: true
+        description: Directory where are stored artifacts from build process.
+      ARTIFACTS_RETENTION:
+        type: number
+        default: 1
+        description: How long to keep build artifact files in a Github repository.
+
+jobs:
+  build:
+    name: 🏗 Build image
+    runs-on: ${{ inputs.BUILD_RUNNER_LABEL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # pin@v4.2.2
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda #pin@v4.1.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a #pin@v4.2.0
+        with:
+          node-version: ${{ inputs.NODEJS_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --prod=false
+        shell: bash
+
+      - name: Export Build Variables
+        if: inputs.BUILD_VARIABLES != ''
+        run: |
+          ARCH="${{ runner.arch }}"
+          ARCH="${ARCH/X64/amd64}"; ARCH="${ARCH/ARM64/arm64}"
+          curl -sL --create-dirs -o ~/.local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${ARCH}
+          chmod +x ~/.local/bin/yq
+          echo "${{ inputs.BUILD_VARIABLES }}" | yq -r 'to_entries | .[] | "\(.key)=\(.value)"' >> $GITHUB_ENV
+
+      - name: Build project
+        run: pnpm nx run ${{ inputs.APP_NAME }}:build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # pin@v4.6.1
+        with:
+          name: frontend-${{ inputs.APP_NAME }}-${{ inputs.ENVIRONMENT }}-${{ github.sha }}
+          path: ${{ inputs.ARTIFACTS_DIR }}
+          retention-days: ${{ inputs.ARTIFACTS_RETENTION }}
