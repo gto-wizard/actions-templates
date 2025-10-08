@@ -60,7 +60,14 @@ runs:
         echo "🔄 Syncing app: $app"
         argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                --server "${{ inputs.ARGOCD_SERVER_URL }}" \
-               --grpc-web app sync "$app"
+               --grpc-web app wait \
+               --operation \
+               "$app" \
+        && argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+               --server "${{ inputs.ARGOCD_SERVER_URL }}" \
+               --grpc-web app sync \
+               --async \
+               "$app"
       done <<< "${{ steps.prepare.outputs.apps }}"
 
   - name: Run argocd wait
@@ -72,5 +79,8 @@ runs:
         echo "⏳ Waiting on app: $app"
         argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                --server "${{ inputs.ARGOCD_SERVER_URL }}" \
-               --grpc-web app wait --timeout "${{ inputs.WAIT_TIMEOUT_SECONDS }}" "$app"
+               --grpc-web app wait --timeout "${{ inputs.WAIT_TIMEOUT_SECONDS }}" \
+               --health \
+               --operation \
+               "$app"
       done <<< "${{ steps.prepare.outputs.apps }}"
