@@ -10,32 +10,67 @@ inputs:
     description: argocd cli version.
   ARGOCD_APP_NAME:
     type: string
-    required: true
-    description: Argocd app name.
+    required: false
+    description: (Deprecated) Single Argocd app name.
+  ARGOCD_APP_NAMES:
+    type: string
+    required: false
+    description: Multiline list of Argocd app names (one per line).
   WAIT_TIMEOUT_SECONDS:
     type: number
     default: 300
-    description: Timeout in seconds for argocd wait
+    description: Timeout in seconds for argocd wait.
   ARGOCD_AUTH_TOKEN:
     required: true
-    description: Argocd cli user auth token
+    description: Argocd cli user auth token.
+
 runs:
   using: 'composite'
-
   steps:
   - name: Download argocd binary
     shell: bash
     run: |
-      # for latest version
-      # ARGOCD_VERSION=$(curl --silent "https://api.github.com/repos/argoproj/argo-cd/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"s]+)".*/\1/' )
-
-      curl -sL --create-dirs  -o ~/.local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/${{ inputs.ARGOCD_VERSION }}/argocd-linux-amd64
+      curl -sL --create-dirs -o ~/.local/bin/argocd \
+        https://github.com/argoproj/argo-cd/releases/download/${{ inputs.ARGOCD_VERSION }}/argocd-linux-amd64
       chmod +x ~/.local/bin/argocd
+
+  - name: Prepare app list
+    id: prepare
+    shell: bash
+    run: |
+      if [ -n "${{ inputs.ARGOCD_APP_NAMES }}" ]; then
+        echo "apps<<EOF" >> $GITHUB_OUTPUT
+        echo "${{ inputs.ARGOCD_APP_NAMES }}" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+      elif [ -n "${{ inputs.ARGOCD_APP_NAME }}" ]; then
+        echo "apps<<EOF" >> $GITHUB_OUTPUT
+        echo "${{ inputs.ARGOCD_APP_NAME }}" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+      else
+        echo "❌ No app name(s) provided. Set ARGOCD_APP_NAME or ARGOCD_APP_NAMES."
+        exit 1
+      fi
 
   - name: Run argocd sync
     shell: bash
-    run: argocd --auth-token ${{ inputs.ARGOCD_AUTH_TOKEN }} --server ${{ inputs.ARGOCD_SERVER_URL}} --grpc-web app sync "${{ inputs.ARGOCD_APP_NAME }}"
+    run: |
+      echo "🔄 Starting ArgoCD sync..."
+      while IFS= read -r app; do
+        [ -z "$app" ] && continue  # skip empty lines
+        echo "🔄 Syncing app: $app"
+        argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+               --server "${{ inputs.ARGOCD_SERVER_URL }}" \
+               --grpc-web app sync "$app"
+      done <<< "${{ steps.prepare.outputs.apps }}"
 
   - name: Run argocd wait
     shell: bash
-    run: argocd --auth-token ${{ inputs.ARGOCD_AUTH_TOKEN }} --server ${{ inputs.ARGOCD_SERVER_URL}} --grpc-web app wait --timeout ${{ inputs.WAIT_TIMEOUT_SECONDS }} "${{ inputs.ARGOCD_APP_NAME }}"
+    run: |
+      echo "⏳ Waiting for apps to become healthy..."
+      while IFS= read -r app; do
+        [ -z "$app" ] && continue  # skip empty lines
+        echo "⏳ Waiting on app: $app"
+        argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+               --server "${{ inputs.ARGOCD_SERVER_URL }}" \
+               --grpc-web app wait --timeout "${{ inputs.WAIT_TIMEOUT_SECONDS }}" "$app"
+      done <<< "${{ steps.prepare.outputs.apps }}"
