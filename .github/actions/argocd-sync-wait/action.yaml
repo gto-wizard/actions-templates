@@ -31,7 +31,7 @@ runs:
     shell: bash
     run: |
       curl -sL --create-dirs -o ~/.local/bin/argocd \
-        https://github.com/argoproj/argo-cd/releases/download/${{ inputs.ARGOCD_VERSION }}/argocd-linux-amd64
+        "https://github.com/argoproj/argo-cd/releases/download/${{ inputs.ARGOCD_VERSION }}/argocd-linux-amd64"
       chmod +x ~/.local/bin/argocd
 
   - name: Prepare app list
@@ -55,32 +55,36 @@ runs:
     shell: bash
     run: |
       echo "🔄 Starting ArgoCD sync..."
-      while IFS= read -r app; do
-        [ -z "$app" ] && continue  # skip empty lines
+      readarray -t apps <<< "${{ steps.prepare.outputs.apps }}"
+
+      for app in "${apps[@]}"; do
         echo "🔄 Syncing app: $app"
+
+        # Wait for any existing operation to complete before syncing
         argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                --server "${{ inputs.ARGOCD_SERVER_URL }}" \
-               --grpc-web app wait \
-               --operation \
-               "$app" \
-        && argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+               --grpc-web app wait --operation --sync "$app" \
+        && \
+        argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                --server "${{ inputs.ARGOCD_SERVER_URL }}" \
-               --grpc-web app sync \
-               --async \
-               "$app"
-      done <<< "${{ steps.prepare.outputs.apps }}"
+               --grpc-web app sync --async "$app"
+      done
 
   - name: Run argocd wait
     shell: bash
     run: |
       echo "⏳ Waiting for apps to become healthy..."
-      while IFS= read -r app; do
-        [ -z "$app" ] && continue  # skip empty lines
+      readarray -t apps <<< "${{ steps.prepare.outputs.apps }}"
+
+      for app in "${apps[@]}"; do
         echo "⏳ Waiting on app: $app"
+
         argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                --server "${{ inputs.ARGOCD_SERVER_URL }}" \
-               --grpc-web app wait --timeout "${{ inputs.WAIT_TIMEOUT_SECONDS }}" \
+               --grpc-web app wait \
+               --timeout "${{ inputs.WAIT_TIMEOUT_SECONDS }}" \
                --health \
+               --sync \
                --operation \
                "$app"
-      done <<< "${{ steps.prepare.outputs.apps }}"
+      done
