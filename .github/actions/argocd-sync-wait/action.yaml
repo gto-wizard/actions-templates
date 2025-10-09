@@ -63,11 +63,16 @@ runs:
         # Wait for any existing operation to complete before syncing
         argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                --server "${{ inputs.ARGOCD_SERVER_URL }}" \
-               --grpc-web app wait --operation --sync "$app" \
+               --grpc-web app wait \
+               --timeout "${{ inputs.WAIT_TIMEOUT_SECONDS }}" \
+               --operation \
+               --sync \
+               "$app" \
         && \
         argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                --server "${{ inputs.ARGOCD_SERVER_URL }}" \
-               --grpc-web app sync --async "$app"
+               --grpc-web app sync \
+               --async "$app"
       done
 
   - name: Run argocd wait
