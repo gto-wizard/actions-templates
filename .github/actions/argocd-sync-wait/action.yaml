@@ -1,0 +1,96 @@
+name: 🗘 Argocd sync and wait
+inputs:
+  ARGOCD_SERVER_URL:
+    type: string
+    default: argocd.services.gtowiz.com
+    description: Argocd server endpoint url.
+  ARGOCD_VERSION:
+    type: string
+    default: v2.14.11
+    description: argocd cli version.
+  ARGOCD_APP_NAME:
+    type: string
+    required: false
+    description: (Deprecated) Single Argocd app name.
+  ARGOCD_APP_NAMES:
+    type: string
+    required: false
+    description: Multiline list of Argocd app names (one per line).
+  WAIT_TIMEOUT_SECONDS:
+    type: number
+    default: 300
+    description: Timeout in seconds for argocd wait.
+  ARGOCD_AUTH_TOKEN:
+    required: true
+    description: Argocd cli user auth token.
+
+runs:
+  using: 'composite'
+  steps:
+  - name: Download argocd binary
+    shell: bash
+    run: |
+      curl -sL --create-dirs -o ~/.local/bin/argocd \
+        "https://github.com/argoproj/argo-cd/releases/download/${{ inputs.ARGOCD_VERSION }}/argocd-linux-amd64"
+      chmod +x ~/.local/bin/argocd
+
+  - name: Prepare app list
+    id: prepare
+    shell: bash
+    run: |
+      if [ -n "${{ inputs.ARGOCD_APP_NAMES }}" ]; then
+        echo "apps<<EOF" >> $GITHUB_OUTPUT
+        echo "${{ inputs.ARGOCD_APP_NAMES }}" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+      elif [ -n "${{ inputs.ARGOCD_APP_NAME }}" ]; then
+        echo "apps<<EOF" >> $GITHUB_OUTPUT
+        echo "${{ inputs.ARGOCD_APP_NAME }}" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+      else
+        echo "❌ No app name(s) provided. Set ARGOCD_APP_NAME or ARGOCD_APP_NAMES."
+        exit 1
+      fi
+
+  - name: Run argocd sync
+    shell: bash
+    run: |
+      echo "🔄 Starting ArgoCD sync..."
+      readarray -t apps <<< "${{ steps.prepare.outputs.apps }}"
+
+      for app in "${apps[@]}"; do
+        echo "🔄 Syncing app: $app"
+
+        # Wait for any existing operation to complete before syncing
+        # https://github.com/argoproj/argo-cd/issues/4505#issuecomment-855980253
+        argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+               --server "${{ inputs.ARGOCD_SERVER_URL }}" \
+               --grpc-web app wait \
+               --timeout "${{ inputs.WAIT_TIMEOUT_SECONDS }}" \
+               --operation \
+               "$app"
+
+        # Using error suppression for "another operation is already in progress" errors
+        ( argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+                 --server "${{ inputs.ARGOCD_SERVER_URL }}" \
+                 --grpc-web app sync \
+                 --async "$app" || true )
+      done
+
+  - name: Run argocd wait
+    shell: bash
+    run: |
+      echo "⏳ Waiting for apps to become healthy..."
+      readarray -t apps <<< "${{ steps.prepare.outputs.apps }}"
+
+      for app in "${apps[@]}"; do
+        echo "⏳ Waiting on app: $app"
+
+        argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+               --server "${{ inputs.ARGOCD_SERVER_URL }}" \
+               --grpc-web app wait \
+               --timeout "${{ inputs.WAIT_TIMEOUT_SECONDS }}" \
+               --health \
+               --sync \
+               --operation \
+               "$app"
+      done
