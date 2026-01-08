@@ -1,0 +1,100 @@
+# This workflow deploys applications to Kubernetes by patching manifests in k8s-resources
+# and optionally syncing with ArgoCD.
+# It is designed to work with builds from build-multi.yaml and build-multi-qemu.yaml workflows.
+
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      APP_NAME:
+        required: true
+        type: string
+        description: General name of application (webapp, solutions, gtowiz-dwh, etc.)
+      APP_ENVIRONMENT:
+        required: true
+        type: string
+        description: Name of environment (dev, prod, services, etl, etc.)
+      TARGET_REPOSITORY_FILES:
+        required: true
+        type: string
+        description: Comma-separated list of files that need to be patched in k8s-resources repo
+      IMAGE_REPOSITORY:
+        required: true
+        type: string
+        description: Full image repository path (e.g., ECR registry + image name)
+      BUILD_RUNNER_LABEL:
+        type: string
+        default: ubuntu-latest
+        description: Routes jobs to runners with this label
+      PATCH_WORKFLOW_REF:
+        type: string
+        default: v6
+        description: Git ref for the patch.yaml workflow in k8s-resources
+      ENABLE_ARGOCD_SYNC:
+        type: boolean
+        default: true
+        description: Enable ArgoCD sync and wait after patching manifests
+      ARGOCD_APP_NAME:
+        type: string
+        description: ArgoCD application name (defaults to APP_NAME-APP_ENVIRONMENT if not specified)
+      ARGOCD_WAIT_TIMEOUT_SECONDS:
+        type: number
+        default: 300
+        description: Timeout in seconds for ArgoCD sync wait
+
+jobs:
+  deploy:
+    name: ☎️ Deployment
+    runs-on: ${{ inputs.BUILD_RUNNER_LABEL }}
+    steps:
+      - name: Get short-sha
+        id: short-sha
+        uses: benjlevesque/short-sha@599815c8ee942a9616c92bcfb4f947a3b670ab0b # pin@v3.0
+
+      - name: Log in to the Dockerhub registry
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # pin@v3.3.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Get github-app-token
+        uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # pin@v2.0.6
+        id: app-token
+        with:
+          app-id: ${{ vars.GTOW_K8S_RESOURCES_APP_ID }}
+          private-key: ${{ secrets.GTOW_K8S_RESOURCES_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: k8s-resources
+
+      - name: Trigger k8s-resources patch workflow
+        uses: convictional/trigger-workflow-and-wait@f69fa9eedd3c62a599220f4d5745230e237904be # pin@v1.6.5
+        with:
+          owner: gto-wizard
+          repo: k8s-resources
+          github_token: ${{ steps.app-token.outputs.token }}
+          workflow_file_name: patch.yaml
+          ref: ${{ inputs.PATCH_WORKFLOW_REF }}
+          client_payload: >
+            {
+              "APP_ENVIRONMENT": "${{ inputs.APP_ENVIRONMENT }}",
+              "APP_NAME": "${{ inputs.APP_NAME }}",
+              "TARGET_REPOSITORY_FILES": "${{ inputs.TARGET_REPOSITORY_FILES }}",
+              "IMAGE_REPOSITORY": "${{ inputs.IMAGE_REPOSITORY }}",
+              "RELEASE_URL": "${{ github.server_url }}/${{ github.repository }}/commit/${{ steps.short-sha.outputs.sha }}",
+              "RELEASE_NAME": "${{ steps.short-sha.outputs.sha }}",
+              "RELEASE_ACTOR": "${{ github.actor }}"
+            }
+          propagate_failure: true
+          trigger_workflow: true
+          wait_workflow: true
+
+      - name: ArgoCD sync & wait
+        if: ${{ inputs.ENABLE_ARGOCD_SYNC }}
+        uses: gto-wizard/actions-templates/.github/actions/argocd-sync-wait@main
+        with:
+          ARGOCD_APP_NAMES: |-
+            "${{ inputs.ARGOCD_APP_NAME != '' && inputs.ARGOCD_APP_NAME || format('{0}-{1}', inputs.APP_NAME, inputs.APP_ENVIRONMENT) }}"
+          ARGOCD_AUTH_TOKEN: "${{ secrets.ARGOCD_AUTH_TOKEN }}"
+          WAIT_TIMEOUT_SECONDS: ${{ inputs.ARGOCD_WAIT_TIMEOUT_SECONDS }}
+
