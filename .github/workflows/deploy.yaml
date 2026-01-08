@@ -97,4 +97,3 @@ jobs:
             "${{ inputs.ARGOCD_APP_NAME != '' && inputs.ARGOCD_APP_NAME || format('{0}-{1}', inputs.APP_NAME, inputs.APP_ENVIRONMENT) }}"
           ARGOCD_AUTH_TOKEN: "${{ secrets.ARGOCD_AUTH_TOKEN }}"
           WAIT_TIMEOUT_SECONDS: ${{ inputs.ARGOCD_WAIT_TIMEOUT_SECONDS }}
-
