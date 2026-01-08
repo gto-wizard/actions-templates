@@ -23,11 +23,11 @@ Multi-arch Docker build using QEMU emulation.
 ### `deploy.yaml`
 Deploys to Kubernetes via k8s-resources patching and ArgoCD sync.
 
-
 ```yaml
 deploy:
   needs: build
   uses: gto-wizard/actions-templates/.github/workflows/deploy.yaml@main
+  secrets: inherit
   with:
     APP_NAME: my-app
     APP_ENVIRONMENT: prod
