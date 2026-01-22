@@ -33,6 +33,11 @@ on:
         required: true
         type: string
         description: Custom ADM64 CI runner label
+      DOCKER_BUILDX_VERSION:
+        required: false
+        default: "v0.31.1"
+        type: string
+        description: 
       RUNS_ON_LABEL_ARM64:
         required: true
         type: string
@@ -113,9 +118,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-        env:
-          DOCKER_API_VERSION: "1.43"
         with:
+          version: ${{ inputs.DOCKER_BUILDX_VERSION }}
           endpoint: builders
           platforms: ${{ matrix.platform }}
 
