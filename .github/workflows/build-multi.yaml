@@ -260,3 +260,13 @@ jobs:
         id: inspect
         run: |
           docker buildx imagetools inspect '${{ steps.ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}:${{ steps.meta.outputs.version }}'
+
+      - name: Job summary
+        run: |
+          echo "## Docker image" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository | \`${{ steps.ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Full image | \`${{ steps.ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
