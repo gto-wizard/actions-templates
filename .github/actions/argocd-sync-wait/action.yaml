@@ -2,11 +2,11 @@ name: 🗘 Argocd sync and wait
 inputs:
   ARGOCD_SERVER_URL:
     type: string
-    default: argocd.services.gtowiz.com
+    default: grpc-argocd.services.gtowiz.com
     description: Argocd server endpoint url.
   ARGOCD_VERSION:
     type: string
-    default: v2.14.11
+    default: v3.3.6
     description: argocd cli version.
   ARGOCD_APP_NAME:
     type: string
