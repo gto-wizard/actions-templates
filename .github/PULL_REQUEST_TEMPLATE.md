@@ -7,7 +7,7 @@
 
 ## Linear Ticket
 
-Refs: [OPS-XX](https://linear.app/gto-wizard/issue/OPS-XX)
+Refs: [TICKET-ID](https://linear.app/gto-wizard/issue/TICKET-ID)
 
 ## Environments Affected
 
