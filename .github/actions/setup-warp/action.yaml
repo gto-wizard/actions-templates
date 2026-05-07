@@ -1,0 +1,110 @@
+name: "Setup Cloudflare WARP"
+description: "Install and connect Cloudflare WARP in proxy mode using service token auth"
+
+inputs:
+  organization:
+    description: "Cloudflare Zero Trust organization name"
+    required: true
+  auth-client-id:
+    description: "Cloudflare Access service token client ID"
+    required: true
+  auth-client-secret:
+    description: "Cloudflare Access service token client secret"
+    required: true
+  proxy-port:
+    description: "WARP proxy listen port"
+    required: false
+    default: "40000"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Ensure sudo is available
+      shell: bash
+      run: |
+        if ! command -v sudo &>/dev/null; then
+          apt-get update && apt-get install -y sudo
+        fi
+
+    - name: Write MDM config
+      shell: bash
+      run: |
+        sudo mkdir -p /var/lib/cloudflare-warp
+        # `tee > /dev/null` — don't echo the auth-client-secret (the heredoc
+        # body) to the job log. GitHub's secret masker is line-based and
+        # brittle with XML-encoded values; this is belt-and-braces.
+        cat <<-XMLEOF | sudo tee /var/lib/cloudflare-warp/mdm.xml > /dev/null
+        <dict>
+          <key>organization</key>
+          <string>${{ inputs.organization }}</string>
+          <key>auth_client_id</key>
+          <string>${{ inputs.auth-client-id }}</string>
+          <key>auth_client_secret</key>
+          <string>${{ inputs.auth-client-secret }}</string>
+          <key>warp_enabled</key>
+          <true/>
+          <key>onboarding</key>
+          <false/>
+          <key>mode</key>
+          <string>proxy</string>
+          <key>proxy_port</key>
+          <integer>${{ inputs.proxy-port }}</integer>
+        </dict>
+        XMLEOF
+
+    - name: Install Cloudflare WARP
+      shell: bash
+      run: |
+        sudo apt-get update && \
+        sudo apt-get install -y \
+          gnupg \
+          ca-certificates \
+          lsb-release \
+          curl
+
+        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
+          | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+
+        sudo apt-get update && sudo apt-get install -y cloudflare-warp
+
+    - name: Start and connect WARP
+      shell: bash
+      run: |
+        sudo mkdir -p /var/log
+        sudo nohup warp-svc >> /tmp/warp-svc.log 2>&1 &
+        echo "warp-svc PID: $!"
+        sleep 2
+
+        warp_svc_ready=false
+        for i in $(seq 1 10); do
+          if warp-cli status >/dev/null 2>&1; then
+            warp_svc_ready=true
+            echo "warp-svc is up"
+            break
+          fi
+          sleep 1
+        done
+        if [ "$warp_svc_ready" != "true" ]; then
+          echo "warp-svc did not become ready after 10s"
+          echo "warp-cli status:"
+          warp-cli status || true
+          exit 1
+        fi
+
+        warp-cli connect
+        warp_connected=false
+        for i in $(seq 1 30); do
+          warp_status="$(warp-cli status 2>&1 || true)"
+          if echo "$warp_status" | grep -q "Connected"; then
+            warp_connected=true
+            echo "WARP connected after ${i}s"
+            break
+          fi
+          sleep 1
+        done
+        if [ "$warp_connected" != "true" ]; then
+          echo "WARP not connected after 30s"
+          echo "$warp_status"
+          exit 1
+        fi
