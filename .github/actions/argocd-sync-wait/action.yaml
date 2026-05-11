@@ -33,6 +33,7 @@ runs:
         curl -sL --create-dirs -o ~/.local/bin/argocd \
           "https://github.com/argoproj/argo-cd/releases/download/${{ inputs.ARGOCD_VERSION }}/argocd-linux-amd64"
         chmod +x ~/.local/bin/argocd
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Prepare app list
       id: prepare
