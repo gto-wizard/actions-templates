@@ -44,3 +44,17 @@ Kubernetes ArgoCD sync and wait utility. Waits for application sync and healthy 
     ARGOCD_APP_NAMES: "my-app-dev"
     ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
 ```
+
+### `setup-warp`
+Installs Cloudflare WARP and connects it in **proxy mode** so subsequent steps can reach internal services (e.g. `grafana.gtowiz.com`) over an authenticated tunnel. The proxy listens on `localhost:<proxy-port>` (default `40000`) — point `curl --proxy` or `HTTP_PROXY` / `HTTPS_PROXY` env vars at it.
+
+```yaml
+- uses: gto-wizard/actions-templates/.github/actions/setup-warp@main
+  with:
+    organization: gtowizard
+    auth-client-id: ${{ vars.CF_GITHUB_ACTIONS_DIND_ACCESS_CLIENT_ID }}
+    auth-client-secret: ${{ secrets.CF_GITHUB_ACTIONS_DIND_ACCESS_CLIENT_SECRET }}
+
+# Then route requests through the proxy:
+- run: curl --proxy http://localhost:40000 https://internal.gtowiz.com/...
+```
