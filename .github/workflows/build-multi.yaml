@@ -116,13 +116,6 @@ jobs:
         run: |
           docker context create builders
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-        with:
-          version: ${{ inputs.DOCKER_BUILDX_VERSION }}
-          endpoint: builders
-          platforms: ${{ matrix.platform }}
-
       - name: Configure AWS credentials for ECR
         uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # pin@v4.1.0
         with:
@@ -132,6 +125,15 @@ jobs:
       - name: Login to Amazon ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # pin@v2.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          version: ${{ inputs.DOCKER_BUILDX_VERSION }}
+          endpoint: builders
+          platforms: ${{ matrix.platform }}
+          driver-opts: |
+            image=${{ steps.ecr.outputs.registry }}/docker.io/moby/buildkit:buildx-stable-1
 
       - name: Buildcache docker meta
         id: cache-meta
@@ -204,12 +206,6 @@ jobs:
           pattern: digests-*
           merge-multiple: true
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
-        with:
-          driver-opts: |
-            network=host
-
       - name: Configure AWS credentials for ECR
         uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # pin@v4.1.0
         with:
@@ -219,6 +215,13 @@ jobs:
       - name: Login to Amazon ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # pin@v2.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+        with:
+          driver-opts: |
+            network=host
+            image=${{ steps.ecr.outputs.registry }}/docker.io/moby/buildkit:buildx-stable-1
 
       - name: Docker meta
         id: meta
