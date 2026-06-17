@@ -63,6 +63,10 @@ on:
         type: boolean
         default: false
         description: Create SSH agent and pass it to dockerbuild
+      DOCKER_METADATA_PR_HEAD_SHA:
+        type: boolean
+        default: false
+        description: On pull_request, compute the type=sha tag from the PR head SHA instead of the merge commit SHA.
     secrets:
       CHECKOUT_2ND_REPO_SSH_KEY:
         description: Additional repository ssh-key definition
@@ -232,6 +236,8 @@ jobs:
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        env:
+          DOCKER_METADATA_PR_HEAD_SHA: ${{ inputs.DOCKER_METADATA_PR_HEAD_SHA }}
         with:
           images: ${{ steps.ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}
           annotations: |
