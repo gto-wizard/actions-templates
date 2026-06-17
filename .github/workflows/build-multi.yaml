@@ -26,7 +26,7 @@ on:
         type: boolean
         default: true
         description: Push the build result to registry
-      PR_HEAD_SHA:
+      DOCKER_METADATA_PR_HEAD_SHA:
         required: false
         type: boolean
         default: false
@@ -79,8 +79,6 @@ jobs:
   build:
     name: 🐋 Build image - ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'linux/amd64' && inputs.RUNS_ON_LABEL_AMD64 || matrix.platform == 'linux/arm64' && inputs.RUNS_ON_LABEL_ARM64 }}
-    env:
-      DOCKER_METADATA_PR_HEAD_SHA: ${{ inputs.PR_HEAD_SHA }}
     strategy:
       fail-fast: false
       matrix:
@@ -197,8 +195,6 @@ jobs:
     name: 🥨 Merge manifests
     if: ${{ inputs.DOCKER_PUSH }}
     runs-on: ubuntu-latest
-    env:
-      DOCKER_METADATA_PR_HEAD_SHA: ${{ inputs.PR_HEAD_SHA }}
     needs:
       - build
     permissions:
@@ -232,6 +228,8 @@ jobs:
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        env:
+          DOCKER_METADATA_PR_HEAD_SHA: ${{ inputs.DOCKER_METADATA_PR_HEAD_SHA }}
         with:
           images: ${{ steps.ecr.outputs.registry }}/${{ inputs.IMAGE_NAME }}
           annotations: |
