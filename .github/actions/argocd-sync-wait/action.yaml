@@ -1,4 +1,5 @@
 name: 🗘 Argocd sync and wait
+description: Sync the given ArgoCD app(s) and wait for them to become healthy; terminates the operation on timeout.
 inputs:
   ARGOCD_SERVER_URL:
     type: string
@@ -86,12 +87,22 @@ runs:
         for app in "${apps[@]}"; do
           echo "⏳ Waiting on app: $app"
 
-          argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+          # On timeout, terminate the in-flight sync operation instead of leaving
+          # it running server-side. `app wait --timeout` only bounds the CLI wait;
+          # the operation itself keeps running (and can hang for hours on a stuck
+          # Sync hook) until terminated. Terminate, then fail the step.
+          if ! argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                  --server "${{ inputs.ARGOCD_SERVER_URL }}" \
                  --grpc-web app wait \
                  --timeout "${{ inputs.WAIT_TIMEOUT_SECONDS }}" \
                  --health \
                  --sync \
                  --operation \
-                 "$app"
+                 "$app"; then
+            echo "❌ Wait timed out for $app after ${{ inputs.WAIT_TIMEOUT_SECONDS }}s — terminating the in-flight sync operation."
+            argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+                   --server "${{ inputs.ARGOCD_SERVER_URL }}" \
+                   --grpc-web app terminate-op "$app" || true
+            exit 1
+          fi
         done
