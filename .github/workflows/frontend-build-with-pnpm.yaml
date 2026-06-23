@@ -64,7 +64,9 @@ jobs:
           echo "$BUILD_VARIABLES" | ~/.local/bin/yq -r 'to_entries | .[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
 
       - name: Build project
-        run: pnpm nx run ${{ inputs.APP_NAME }}:build
+        env:
+          APP_NAME: ${{ inputs.APP_NAME }}
+        run: pnpm nx run "$APP_NAME:build"
 
       - name: Upload artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # pin@v4.6.1

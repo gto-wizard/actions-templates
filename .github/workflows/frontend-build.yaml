@@ -82,7 +82,9 @@ jobs:
 
       - name: Build project
         working-directory: ${{ inputs.WORKING_DIR }}
-        run: npm run ${{ inputs.BUILD_SCRIPT }}
+        env:
+          BUILD_SCRIPT: ${{ inputs.BUILD_SCRIPT }}
+        run: npm run "$BUILD_SCRIPT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # pin@v4.6.1
