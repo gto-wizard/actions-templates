@@ -71,16 +71,20 @@ jobs:
 
       - name: Export Build Variables
         if: inputs.BUILD_VARIABLES != ''
+        env:
+          BUILD_VARIABLES: ${{ inputs.BUILD_VARIABLES }}
         run: |
           ARCH="${{ runner.arch }}"
           ARCH="${ARCH/X64/amd64}"; ARCH="${ARCH/ARM64/arm64}"
-          curl -sL --create-dirs -o ~/.local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${ARCH}
+          curl -fsSL --create-dirs -o ~/.local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${ARCH}
           chmod +x ~/.local/bin/yq
-          echo "${{ inputs.BUILD_VARIABLES }}" | yq -r 'to_entries | .[] | "\(.key)=\(.value)"' >> $GITHUB_ENV
+          echo "$BUILD_VARIABLES" | ~/.local/bin/yq -r 'to_entries | .[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
 
       - name: Build project
         working-directory: ${{ inputs.WORKING_DIR }}
-        run: npm run ${{ inputs.BUILD_SCRIPT }}
+        env:
+          BUILD_SCRIPT: ${{ inputs.BUILD_SCRIPT }}
+        run: npm run "$BUILD_SCRIPT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # pin@v4.6.1
