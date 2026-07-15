@@ -87,35 +87,28 @@ runs:
         total_budget="${{ inputs.WAIT_TIMEOUT_SECONDS }}"
 
         for app in "${apps[@]}"; do
+          # Skip an empty element (readarray can yield a trailing "" on a trailing
+          # newline); otherwise it would fail both probes and mislabel as unreachable.
+          [ -n "$app" ] || continue
           echo "⏳ Waiting on app: $app (budget: ${total_budget}s)"
 
-          # `argocd app wait --health` FAILS FAST the moment it observes a single
-          # `Degraded` health transition — it does NOT wait out --timeout. Preview
-          # apps with KEDA scale-to-zero deployments legitimately flap through
-          # Degraded on first sync (KEDA creating the HPA / scaling the initial
-          # replica to 0, ExternalSecrets still populating the trigger secret)
-          # before converging to Healthy. A single `app wait` therefore aborts the
-          # deploy on a transient flap even though the app recovers seconds later.
-          # (Observed behavior of the pinned argocd CLI — see ARGOCD_VERSION above;
-          # `app wait --health` returns an error the first time it sees Degraded
-          # rather than continuing to watch. Re-verify if bumping the CLI version.)
+          # CORRECTNESS LANDMINE: `argocd app wait --health` FAILS FAST the moment it
+          # observes a single `Degraded` health transition — it does NOT wait out
+          # --timeout (observed behavior of the pinned argocd CLI; re-verify if
+          # bumping ARGOCD_VERSION). KEDA scale-to-zero preview apps legitimately flap
+          # through Degraded on first sync before converging to Healthy, so a single
+          # `app wait` aborts a deploy that recovers seconds later. Full narrative: PR.
           #
-          # Instead we RE-WAIT in a loop bounded by a single wall-clock deadline:
-          # each iteration waits with only the REMAINING budget, so a transient
-          # Degraded fast-fail is retried while a genuinely-stuck app exhausts the
-          # budget and fails. Total wall-clock is capped (approximately, modulo the
-          # small `app get` probe below) at WAIT_TIMEOUT_SECONDS — the budget is NOT
-          # multiplied by the number of retries.
+          # Fix: RE-WAIT in a loop bounded by one wall-clock deadline — each attempt
+          # uses only the REMAINING budget, so total wall-clock stays ~WAIT_TIMEOUT_SECONDS
+          # (plus the small `app get` probe below), not budget × retries.
           #
-          # We ONLY retry on plausible health flaps. A hard error (bad/expired
-          # token, RBAC denial, server unreachable, unknown app) is NOT a flap —
-          # retrying it just burns the whole budget and mislabels an incident as a
-          # "transient Degraded" timeout. The hard-vs-transient decision is made
-          # from argocd's STRUCTURED state, NOT its free-text error wording (which
-          # collides with resource-health text like "…probe failed: … connection
-          # refused"): after a failed wait we probe `argocd app get`. A health flap
-          # does NOT break `app get`; a real auth/connectivity/unknown-app problem
-          # breaks it too. That is the clean, wording-independent signal.
+          # LANDMINE 2: telling a transient flap from a hard error (bad/expired token,
+          # RBAC denial, unreachable server, unknown app) must NOT parse argocd's
+          # free-text output — its wording collides with resource-health text (e.g.
+          # "…probe failed: … connection refused"). Instead probe argocd's STRUCTURED
+          # state with `app get`: a health flap does NOT break `app get`; a real
+          # auth/connectivity/unknown-app problem breaks it too. Wording-independent.
           backoff_interval=5
           deadline=$(( $(date +%s) + total_budget ))
           healthy=false
@@ -126,10 +119,9 @@ runs:
               break
             fi
 
-            # --operation waits for the in-flight sync to finish, --sync for Synced,
-            # --health for Healthy. Bound each attempt by the remaining budget so the
-            # loop can never exceed the total deadline. Output streams to the job log;
-            # the exit code is inspected via the `if` so `set -e` is not tripped.
+            # Bound each attempt by the remaining budget so the loop can never exceed
+            # the total deadline. Output streams to the job log; the exit code is
+            # inspected via the `if` so `set -e` is not tripped.
             if argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                    --server "${{ inputs.ARGOCD_SERVER_URL }}" \
                    --grpc-web app wait \
@@ -175,6 +167,12 @@ runs:
 
             if [ "$app_readable" != true ]; then
               echo "❌ $app: argocd is unreachable or the app is not readable (auth / connectivity / unknown app), not a health flap — failing fast without burning the ${total_budget}s budget."
+              # Best-effort terminate: if a sync op is genuinely stuck server-side and
+              # this is a connectivity blip that outlasted both probes, don't orphan it.
+              # `|| true` — a no-op/failure here must not mask the real error above.
+              argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+                     --server "${{ inputs.ARGOCD_SERVER_URL }}" \
+                     --grpc-web app terminate-op "$app" || true
               exit 1
             fi
 
