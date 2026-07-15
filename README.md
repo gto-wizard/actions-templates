@@ -43,7 +43,10 @@ Kubernetes ArgoCD sync and wait utility. Waits for application sync and healthy 
   with:
     ARGOCD_APP_NAMES: "my-app-dev"
     ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+    WAIT_TIMEOUT_SECONDS: 300
 ```
+
+The health wait **tolerates a transient `Degraded → Healthy` recovery**. `argocd app wait --health` fails fast on the first `Degraded` observation, so apps that legitimately flap through `Degraded` on first sync (e.g. KEDA scale-to-zero deployments creating the HPA / scaling to 0 while ExternalSecrets populate the trigger secret) are re-waited within a single wall-clock deadline. `WAIT_TIMEOUT_SECONDS` is the **total** budget per app — it is not multiplied by retries. If an app never reaches `Healthy` within the budget, the in-flight sync operation is terminated (`terminate-op`) and the step fails.
 
 ### `setup-warp`
 Installs Cloudflare WARP and connects it in **proxy mode** so subsequent steps can reach internal services (e.g. `grafana.gtowiz.com`) over an authenticated tunnel. The proxy listens on `localhost:<proxy-port>` (default `40000`) — point `curl --proxy` or `HTTP_PROXY` / `HTTPS_PROXY` env vars at it.

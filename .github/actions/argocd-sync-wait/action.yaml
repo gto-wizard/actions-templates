@@ -84,25 +84,80 @@ runs:
         echo "⏳ Waiting for apps to become healthy..."
         readarray -t apps <<< "${{ steps.prepare.outputs.apps }}"
 
-        for app in "${apps[@]}"; do
-          echo "⏳ Waiting on app: $app"
+        total_budget="${{ inputs.WAIT_TIMEOUT_SECONDS }}"
 
-          # On timeout, terminate the in-flight sync operation instead of leaving
-          # it running server-side. `app wait --timeout` only bounds the CLI wait;
-          # the operation itself keeps running (and can hang for hours on a stuck
-          # Sync hook) until terminated. Terminate, then fail the step.
-          if ! argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
-                 --server "${{ inputs.ARGOCD_SERVER_URL }}" \
-                 --grpc-web app wait \
-                 --timeout "${{ inputs.WAIT_TIMEOUT_SECONDS }}" \
-                 --health \
-                 --sync \
-                 --operation \
-                 "$app"; then
-            echo "❌ Wait timed out for $app after ${{ inputs.WAIT_TIMEOUT_SECONDS }}s — terminating the in-flight sync operation."
-            argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+        for app in "${apps[@]}"; do
+          echo "⏳ Waiting on app: $app (budget: ${total_budget}s)"
+
+          # `argocd app wait --health` FAILS FAST the moment it observes a single
+          # `Degraded` health transition — it does NOT wait out --timeout. Preview
+          # apps with KEDA scale-to-zero deployments legitimately flap through
+          # Degraded on first sync (KEDA creating the HPA / scaling the initial
+          # replica to 0, ExternalSecrets still populating the trigger secret)
+          # before converging to Healthy. A single `app wait` therefore aborts the
+          # deploy on a transient flap even though the app recovers seconds later.
+          #
+          # Instead we RE-WAIT in a loop bounded by a single wall-clock deadline:
+          # each iteration waits with only the REMAINING budget, so a transient
+          # Degraded fast-fail is retried while a genuinely-stuck app exhausts the
+          # budget and fails. Total wall-clock is capped at WAIT_TIMEOUT_SECONDS —
+          # the budget is NOT multiplied by the number of retries.
+          deadline=$(( $(date +%s) + total_budget ))
+          healthy=false
+
+          while :; do
+            remaining=$(( deadline - $(date +%s) ))
+            if [ "$remaining" -le 0 ]; then
+              break
+            fi
+
+            # --operation waits for the in-flight sync to finish, --sync for Synced,
+            # --health for Healthy. Bound each attempt by the remaining budget so the
+            # loop can never exceed the total deadline.
+            if argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                    --server "${{ inputs.ARGOCD_SERVER_URL }}" \
-                   --grpc-web app terminate-op "$app" || true
-            exit 1
+                   --grpc-web app wait \
+                   --timeout "$remaining" \
+                   --health \
+                   --sync \
+                   --operation \
+                   "$app"; then
+              healthy=true
+              break
+            fi
+
+            # `app wait` returned non-zero before the deadline — almost always a
+            # transient Degraded flap (fast-fail), NOT a timeout. Pause briefly to
+            # avoid a tight retry loop, then re-wait with the reduced budget. If the
+            # app never recovers, `remaining` reaches 0 and we fall through to the
+            # timeout branch below.
+            now_remaining=$(( deadline - $(date +%s) ))
+            if [ "$now_remaining" -le 0 ]; then
+              break
+            fi
+            # Clamp the back-off to the remaining budget so total wall-clock never
+            # exceeds WAIT_TIMEOUT_SECONDS.
+            backoff=5
+            if [ "$now_remaining" -lt "$backoff" ]; then
+              backoff="$now_remaining"
+            fi
+            echo "⚠️ $app not Healthy yet (transient Degraded/Progressing) — re-waiting; ${now_remaining}s budget remaining."
+            sleep "$backoff"
+          done
+
+          if [ "$healthy" = true ]; then
+            echo "✅ $app is Synced + Healthy."
+            continue
           fi
+
+          # Genuine timeout: the app never reached Healthy within the budget.
+          # Terminate the in-flight sync operation instead of leaving it running
+          # server-side — `app wait --timeout` only bounds the CLI wait; the
+          # operation itself keeps running (and can hang for hours on a stuck Sync
+          # hook / ImagePullBackoff) until terminated. Terminate, then fail.
+          echo "❌ $app did not become Healthy within ${total_budget}s — timed out. Terminating the in-flight sync operation."
+          argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+                 --server "${{ inputs.ARGOCD_SERVER_URL }}" \
+                 --grpc-web app terminate-op "$app" || true
+          exit 1
         done
