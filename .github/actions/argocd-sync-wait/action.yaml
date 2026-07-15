@@ -96,12 +96,20 @@ runs:
           # replica to 0, ExternalSecrets still populating the trigger secret)
           # before converging to Healthy. A single `app wait` therefore aborts the
           # deploy on a transient flap even though the app recovers seconds later.
+          # (Observed behavior of the pinned argocd CLI — see ARGOCD_VERSION above;
+          # `app wait --health` returns an error the first time it sees Degraded
+          # rather than continuing to watch. Re-verify if bumping the CLI version.)
           #
           # Instead we RE-WAIT in a loop bounded by a single wall-clock deadline:
           # each iteration waits with only the REMAINING budget, so a transient
           # Degraded fast-fail is retried while a genuinely-stuck app exhausts the
           # budget and fails. Total wall-clock is capped at WAIT_TIMEOUT_SECONDS —
           # the budget is NOT multiplied by the number of retries.
+          #
+          # We ONLY retry on plausible health flaps. A hard error (bad/expired
+          # token, RBAC denial, server unreachable, unknown app) is NOT a flap —
+          # retrying it just burns the whole budget and mislabels an incident as a
+          # "transient Degraded" timeout. Those fail fast with an accurate message.
           deadline=$(( $(date +%s) + total_budget ))
           healthy=false
 
@@ -113,24 +121,47 @@ runs:
 
             # --operation waits for the in-flight sync to finish, --sync for Synced,
             # --health for Healthy. Bound each attempt by the remaining budget so the
-            # loop can never exceed the total deadline.
-            if argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
+            # loop can never exceed the total deadline. Capture stderr+stdout and the
+            # exit code without tripping `set -e` (the `&& / ||` keeps the compound
+            # exit status 0 so we can inspect $wait_rc ourselves).
+            wait_out=$(argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                    --server "${{ inputs.ARGOCD_SERVER_URL }}" \
                    --grpc-web app wait \
                    --timeout "$remaining" \
                    --health \
                    --sync \
                    --operation \
-                   "$app"; then
+                   "$app" 2>&1) && wait_rc=0 || wait_rc=$?
+            # Surface the CLI output in the job log (capturing it hid it otherwise).
+            [ -n "$wait_out" ] && echo "$wait_out"
+
+            if [ "$wait_rc" -eq 0 ]; then
               healthy=true
               break
             fi
 
-            # `app wait` returned non-zero before the deadline — almost always a
-            # transient Degraded flap (fast-fail), NOT a timeout. Pause briefly to
-            # avoid a tight retry loop, then re-wait with the reduced budget. If the
-            # app never recovers, `remaining` reaches 0 and we fall through to the
-            # timeout branch below.
+            # Classify the failure. Match case-insensitively on substrings that are
+            # unambiguously hard errors — deliberately NOT bare "unavailable" /
+            # "not found" / "eof", which also appear in legitimate Degraded health
+            # descriptions (e.g. "replicas unavailable", "image ... not found") and
+            # would regress the flap-tolerance this change adds. gRPC connectivity
+            # (incl. transport EOF) surfaces as "code = Unavailable", which we do
+            # match. When in doubt we fall through to the transient re-wait path.
+            wait_out_lc=$(printf '%s' "$wait_out" | tr '[:upper:]' '[:lower:]')
+            case "$wait_out_lc" in
+              *permissiondenied* | *unauthenticated* | *"invalid session token"* | \
+              *"connection refused"* | *"no such host"* | *"context deadline exceeded"* | \
+              *"code = unavailable"* | *"code = notfound"*)
+                echo "❌ $app: argocd wait failed with a hard error (auth / connectivity / unknown app), not a health flap — failing fast without burning the ${total_budget}s budget."
+                exit 1
+                ;;
+            esac
+
+            # Non-hard failure before the deadline — almost always a transient
+            # Degraded/Progressing flap (fast-fail). Pause briefly to avoid a tight
+            # retry loop, then re-wait with the reduced budget. If the app never
+            # recovers, `remaining` reaches 0 and we fall through to the timeout
+            # branch below.
             now_remaining=$(( deadline - $(date +%s) ))
             if [ "$now_remaining" -le 0 ]; then
               break
@@ -141,7 +172,7 @@ runs:
             if [ "$now_remaining" -lt "$backoff" ]; then
               backoff="$now_remaining"
             fi
-            echo "⚠️ $app not Healthy yet (transient Degraded/Progressing) — re-waiting; ${now_remaining}s budget remaining."
+            echo "⚠️ $app not Healthy yet (no hard error detected — likely a transient Degraded/Progressing flap) — re-waiting; ${now_remaining}s budget remaining."
             sleep "$backoff"
           done
 
