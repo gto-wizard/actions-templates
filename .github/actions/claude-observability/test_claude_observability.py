@@ -82,16 +82,16 @@ class ClassifierInputTest(unittest.TestCase):
 
     def test_grants_the_classifier_read_access_to_its_out_of_tree_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            metadata_file = Path(directory) / "pr-metadata.json"
-            diff_file = Path(directory) / "pr.diff.classifier.patch"
-            argv = MODULE.classifier_argv("claude", metadata_file, diff_file)
+            args = MODULE.classifier_claude_args(Path(directory))
 
         # Metadata and diff live in RUNNER_TEMP, outside the checkout, so Read
         # alone is not enough — the directory has to be granted explicitly.
-        self.assertIn("--add-dir", argv)
-        self.assertEqual(directory, argv[argv.index("--add-dir") + 1])
-        self.assertEqual("Read", argv[argv.index("--allowedTools") + 1])
-        self.assertIn("Bash", argv[argv.index("--disallowedTools") + 1])
+        self.assertIn(f"--add-dir {directory}", args)
+        self.assertIn("--allowedTools Read", args)
+        self.assertIn("--disallowedTools Write,Edit,NotebookEdit,Bash,WebFetch,WebSearch,Agent", args)
+        self.assertIn("--json-schema ", args)
+        # One flag per line is the shape claude_args expects.
+        self.assertTrue(all(line.startswith("--") for line in args.splitlines()))
 
 
 class TimelineTest(unittest.TestCase):
@@ -216,42 +216,140 @@ class NativeSessionTest(unittest.TestCase):
             self.assertIsNone(MODULE.copy_native_session(home, self.SESSION_ID, destination))
 
 
-class ExitCodeTest(unittest.TestCase):
-    """The caller owns the review verdict; reporting may warn but never overrule it."""
+class ReportTest(unittest.TestCase):
+    """`report` reads; it never executes, and it degrades instead of failing."""
 
-    def _run_with_broken_reporting(self, main_rc: int) -> int:
+    METADATA = {
+        "trace": {"trace_id": "a" * 32, "root_span_id": "b" * 16, "traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01"},
+        "github": {"repository": "o/r", "run_id": "9", "run_attempt": "1", "invocation": "primary", "workflow": "w"},
+        "pull_request": {"number": "1", "title": "t", "url": "u", "author": "a"},
+        "attribution": {"api_key_alias": "bot", "department": "DEV", "team_id": "team", "code_areas": "repo"},
+        "service_instance_id": "i",
+        "started_at_unix_nano": 1_000_000_000,
+        "diff_file": "/tmp/pr.diff.patch",
+    }
+
+    def _run_report(self, directory: str, extra_env: dict) -> tuple[int, dict]:
+        artifact_dir = Path(directory)
+        metadata_file = artifact_dir / "pr-metadata.json"
+        metadata_file.write_text(json.dumps(self.METADATA), encoding="utf-8")
+        environment = {
+            "GTO_CLAUDE_ARTIFACT_DIR": str(artifact_dir),
+            "GTO_CLAUDE_METADATA_FILE": str(metadata_file),
+            "HOME": str(artifact_dir / "home"),
+            **extra_env,
+        }
+        with (
+            mock.patch.dict(MODULE.os.environ, environment, clear=False),
+            mock.patch.object(MODULE, "export_summary") as export,
+        ):
+            code = MODULE.report()
+        written = json.loads((artifact_dir / "claude-run-report.json").read_text(encoding="utf-8"))
+        written["_export_called"] = export.called
+        return code, written
+
+    def test_reads_a_json_array_execution_file_and_reconciles_both_costs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            artifact_dir = Path(directory)
-            metadata_file = artifact_dir / "pr-metadata.json"
-            metadata_file.write_text(
-                json.dumps({
-                    "trace": {"traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01"},
-                    "diff_file": str(artifact_dir / "pr.diff.patch"),
-                    "classifier_home": str(artifact_dir / "classifier-home"),
+            # The shape claude-code-action actually writes: a pretty-printed array.
+            review = Path(directory) / "review.json"
+            review.write_text(json.dumps([
+                {"type": "assistant"},
+                {"type": "result", "total_cost_usd": 0.5, "session_id": "s", "num_turns": 4,
+                 "modelUsage": {"claude-sonnet-5": {"costUSD": 0.5}}},
+            ], indent=2), encoding="utf-8")
+            classifier = Path(directory) / "classifier.json"
+            classifier.write_text(json.dumps([
+                {"type": "result", "total_cost_usd": 0.25, "modelUsage": {"claude-haiku-4.5": {"costUSD": 0.25}}},
+            ]), encoding="utf-8")
+
+            code, written = self._run_report(directory, {
+                "GTO_CLAUDE_REVIEW_EXECUTION_FILE": str(review),
+                "GTO_CLAUDE_CLASSIFIER_EXECUTION_FILE": str(classifier),
+                "GTO_CLAUDE_REVIEW_CONCLUSION": "success",
+                "GTO_CLAUDE_CLASSIFIER_CONCLUSION": "success",
+                "GTO_CLAUDE_CLASSIFIER_STRUCTURED_OUTPUT": json.dumps({
+                    "summary": "s", "change_type": "bugfix", "domain": "security", "concerns": [],
+                    "complexity": "light", "complexity_rationale": "r", "risk": "risky", "risk_rationale": "r",
                 }),
-                encoding="utf-8",
-            )
-            environment = {
-                "GTO_CLAUDE_ARTIFACT_DIR": str(artifact_dir),
-                "GTO_CLAUDE_METADATA_FILE": str(metadata_file),
-                "GTO_CLAUDE_RESOURCE_ATTRIBUTES": "service.namespace=gto-ai",
-                "INPUT_PROMPT": "review",
-            }
-            with (
-                mock.patch.dict(MODULE.os.environ, environment, clear=False),
-                mock.patch.object(MODULE, "claude_binary", return_value="/usr/bin/true"),
-                mock.patch.object(MODULE, "stream_command", return_value=main_rc),
-                mock.patch.object(
-                    MODULE, "classify_and_report", side_effect=RuntimeError("classifier exploded")
-                ),
+            })
+
+        self.assertEqual(0, code)
+        self.assertEqual(0.75, written["total_cost_usd"])
+        self.assertEqual("success", written["classification_status"])
+        self.assertEqual("risky", written["classification"]["risk"])
+        self.assertFalse(written["main"]["is_error"])
+        self.assertEqual({"claude-sonnet-5", "claude-haiku-4.5"}, set(written["model_usage"]))
+        self.assertTrue(written["_export_called"])
+
+    def test_a_failed_classifier_degrades_to_unclassified_without_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            review = Path(directory) / "review.json"
+            review.write_text(json.dumps([{"type": "result", "total_cost_usd": 0.5}]), encoding="utf-8")
+
+            code, written = self._run_report(directory, {
+                "GTO_CLAUDE_REVIEW_EXECUTION_FILE": str(review),
+                "GTO_CLAUDE_REVIEW_CONCLUSION": "success",
+                "GTO_CLAUDE_CLASSIFIER_CONCLUSION": "failure",
+            })
+
+        self.assertEqual(0, code)
+        self.assertEqual("failed", written["classification_status"])
+        self.assertEqual("unclassified", written["classification"]["risk"])
+        # The review still reads as a success — the classifier does not vote on it.
+        self.assertFalse(written["main"]["is_error"])
+
+    def test_a_failed_review_is_recorded_as_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            code, written = self._run_report(directory, {"GTO_CLAUDE_REVIEW_CONCLUSION": "failure"})
+
+        self.assertEqual(0, code)  # reporting worked; the verdict is the step's, not ours
+        self.assertTrue(written["main"]["is_error"])
+        self.assertEqual("failure", written["main"]["conclusion"])
+
+
+class ClaudeArgsTest(unittest.TestCase):
+    def test_session_mode_becomes_the_matching_cli_flag(self) -> None:
+        uuid = "1f0e4c5a-9b7d-4a21-8f36-5c0b7a9d1e42"
+        cases = {
+            ("fresh", ""): None,
+            ("create", uuid): f"--session-id {uuid}",
+            ("resume", uuid): f"--resume {uuid}",
+        }
+        for (mode, session), expected in cases.items():
+            with mock.patch.dict(
+                MODULE.os.environ,
+                {"INPUT_SESSION_MODE": mode, "INPUT_SESSION_ID": session, "INPUT_MODEL": "sonnet"},
+                clear=False,
             ):
-                return MODULE.run()
+                args = MODULE.review_claude_args()
+            if expected is None:
+                self.assertNotIn("--session-id", args)
+                self.assertNotIn("--resume", args)
+            else:
+                self.assertIn(expected, args)
 
-    def test_a_failed_classifier_cannot_pass_a_failed_review(self) -> None:
-        self.assertEqual(1, self._run_with_broken_reporting(1))
+    def test_resume_without_a_uuid_is_rejected(self) -> None:
+        with mock.patch.dict(
+            MODULE.os.environ, {"INPUT_SESSION_MODE": "resume", "INPUT_SESSION_ID": "nope"}, clear=False
+        ), self.assertRaises(ValueError):
+            MODULE.review_claude_args()
 
-    def test_a_failed_classifier_cannot_fail_a_passing_review(self) -> None:
-        self.assertEqual(0, self._run_with_broken_reporting(0))
+    def test_output_format_is_never_passed(self) -> None:
+        """claude-code-action owns stdout and writes execution_file itself."""
+        with mock.patch.dict(MODULE.os.environ, {"INPUT_SESSION_MODE": "fresh"}, clear=False):
+            args = MODULE.review_claude_args()
+        self.assertNotIn("--output-format", args)
+        self.assertNotIn("--verbose", args)
+
+    def test_settings_carries_the_otel_env_and_the_classifier_role(self) -> None:
+        settings = json.loads(MODULE.claude_settings("service.namespace=gto-ai", "00-abc-def-01"))
+        self.assertEqual("1", settings["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"])
+        self.assertEqual("00-abc-def-01", settings["env"]["TRACEPARENT"])
+        self.assertEqual("service.namespace=gto-ai", settings["env"]["OTEL_RESOURCE_ATTRIBUTES"])
+        self.assertEqual("0", settings["env"]["OTEL_LOG_USER_PROMPTS"])
+
+        classifier = json.loads(MODULE.claude_settings("a=b", "tp", role="classifier"))
+        self.assertEqual("a=b,gto.agent.role=classifier", classifier["env"]["OTEL_RESOURCE_ATTRIBUTES"])
 
 
 class SummaryPayloadTest(unittest.TestCase):
