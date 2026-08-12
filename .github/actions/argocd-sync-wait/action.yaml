@@ -21,6 +21,12 @@ inputs:
     type: number
     default: 300
     description: Timeout in seconds for argocd wait.
+  PRUNE:
+    type: boolean
+    default: false
+    description: >-
+      Pass --prune to `argocd app sync`, so resources dropped from git are deleted
+      instead of left behind. Opt-in per caller; see the DEADLOCK note on the sync step.
   ARGOCD_AUTH_TOKEN:
     required: true
     description: Argocd cli user auth token.
@@ -55,9 +61,30 @@ runs:
 
     - name: Run argocd sync
       shell: bash
+      env:
+        PRUNE: ${{ inputs.PRUNE }}
       run: |
         echo "🔄 Starting ArgoCD sync..."
         readarray -t apps <<< "${{ steps.prepare.outputs.apps }}"
+
+        # DEADLOCK this guards against: the wait step below uses `app wait --sync`,
+        # which is only satisfied by status Synced. Our ApplicationSets all set
+        # `automated.prune: false`, so a resource deleted from git lingers as
+        # `ignored (requires pruning)` and pins the app OutOfSync FOREVER. Every
+        # subsequent deploy then applies cleanly, reports Healthy, and still burns
+        # the full WAIT_TIMEOUT_SECONDS before terminate-op and exit 1 — the app is
+        # fine, only the gate fails. One orphan reddens CI on every merge until a
+        # human prunes by hand (OPS-1010: gto-brain, ~6 consecutive runs).
+        #
+        # Opt-in rather than always-on: --prune here would hand every caller
+        # automatic deletion of anything removed from git, which is exactly what the
+        # repo-wide `prune: false` convention exists to prevent. Callers that would
+        # rather have CI prune than page a human set PRUNE: true.
+        prune_args=()
+        if [ "$PRUNE" = "true" ]; then
+          prune_args+=(--prune)
+          echo "🧹 Prune enabled — resources no longer in git will be DELETED by this sync."
+        fi
 
         for app in "${apps[@]}"; do
           echo "🔄 Syncing app: $app"
@@ -75,7 +102,7 @@ runs:
           ( argocd --auth-token "${{ inputs.ARGOCD_AUTH_TOKEN }}" \
                    --server "${{ inputs.ARGOCD_SERVER_URL }}" \
                    --grpc-web app sync \
-                   --async "$app" || true )
+                   --async "${prune_args[@]}" "$app" || true )
         done
 
     - name: Run argocd wait
