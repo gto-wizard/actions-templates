@@ -122,18 +122,68 @@ runs:
         INPUT_EXTRA_INSTRUCTIONS: ${{ inputs.extra-instructions }}
       run: python3 "${{ github.action_path }}/opencode_review.py" prepare
 
-    - name: Install opencode (pinned)
+    # The published binary, straight from the release CDN. Measured on the ARC fleet:
+    #
+    #   curl | bash installer      69s, or a connection reset at 0.53s
+    #   docker pull from ghcr.io    2.8s
+    #   this release asset         0.42s for all 60MB
+    #
+    # The installer was never the right primitive: `opencode.ai/install` is a 307 to
+    # raw.githubusercontent.com, which rate-limits per IP, and every reviewer in a panel
+    # shares one NAT egress — two of four jobs had the connection reset mid-body while a
+    # third spent 69 seconds on the same file. Release assets come from
+    # release-assets.githubusercontent.com, which is built for exactly this.
+    #
+    # The `ghcr.io/anomalyco/opencode` image is real and pullable in 2.8s, but it is Alpine
+    # with no git, no node and no python3: a review whose first move is `git diff base...head`
+    # cannot run inside it, and its musl binary is not the one to put on a glibc host — the
+    # release ships separate `-musl` variants precisely because they are not interchangeable.
+    #
+    # No cache layer either, deliberately: restoring 60MB from the Actions cache costs more
+    # than 0.42s of download. Do not "optimize" this back into a cache without re-measuring.
+    - name: Install the pinned opencode CLI
+      id: cli
       shell: bash
       env:
-        # The installer hardcodes $HOME/.opencode/bin, so an isolated HOME is also how the
-        # binary gets isolated: nothing on the runner leaks into the review, and the review
-        # leaves nothing behind. Models in a panel share a fleet but never a home.
-        HOME: ${{ steps.prepare.outputs.home-dir }}
         VERSION: ${{ inputs.opencode-version }}
+        CLI_DIR: ${{ runner.temp }}/opencode-cli
       run: |
         set -euo pipefail
-        curl -fsSL https://opencode.ai/install | bash
-        "$HOME/.opencode/bin/opencode" --version
+        case "$RUNNER_ARCH" in
+          X64) arch=x64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "::error::unsupported runner architecture $RUNNER_ARCH"; exit 1 ;;
+        esac
+        case "$RUNNER_OS" in
+          Linux)
+            os=linux
+            extension=tar.gz
+            # The release ships glibc and musl builds as separate assets. Ask the runner which
+            # it is rather than assuming Ubuntu: an Alpine-based fleet would silently get a
+            # binary that cannot exec.
+            if ldd --version 2>&1 | grep -qi musl; then libc=-musl; else libc=""; fi
+            ;;
+          macOS) os=darwin; extension=zip; libc="" ;;
+          *) echo "::error::unsupported runner OS $RUNNER_OS"; exit 1 ;;
+        esac
+        asset="opencode-${os}-${arch}${libc}.${extension}"
+        url="https://github.com/anomalyco/opencode/releases/download/v${VERSION}/${asset}"
+        mkdir -p "$CLI_DIR"
+        echo "Fetching $asset"
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 15 \
+          -o "$CLI_DIR/$asset" "$url"
+        case "$extension" in
+          tar.gz) tar -xzf "$CLI_DIR/$asset" -C "$CLI_DIR" ;;
+          zip) unzip -qo "$CLI_DIR/$asset" -d "$CLI_DIR" ;;
+        esac
+        rm -f "$CLI_DIR/$asset"
+        # The archive holds a bare `opencode` at its root today. Locate it rather than trust
+        # that: a layout change would otherwise surface as a confusing PATH error later.
+        binary="$(find "$CLI_DIR" -maxdepth 3 -type f -name opencode -print -quit)"
+        [ -n "$binary" ] || { echo "::error::no opencode binary inside $asset"; exit 1; }
+        chmod +x "$binary"
+        echo "bin-dir=$(dirname "$binary")" >> "$GITHUB_OUTPUT"
+        "$binary" --version
 
     # `continue-on-error` does not exist for composite steps, so the exit code is captured
     # here and acted on by the last step. Everything between them is reporting, and reporting
@@ -142,7 +192,10 @@ runs:
       id: run
       shell: bash
       env:
+        # The review's own HOME — config discovery and session state — separate from where
+        # the shared binary lives.
         HOME: ${{ steps.prepare.outputs.home-dir }}
+        CLI_BIN: ${{ steps.cli.outputs.bin-dir }}
         ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
         PROMPT_FILE: ${{ steps.prepare.outputs.prompt-file }}
         CONFIG_FILE: ${{ steps.prepare.outputs.config-file }}
@@ -154,7 +207,12 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -uo pipefail
-        export PATH="$HOME/.opencode/bin:$PATH"
+        # errexit OFF, deliberately. GitHub runs composite `run` steps under `bash -e`, so a
+        # non-zero review pipeline aborts this step at the pipeline itself and never reaches
+        # the `exit-code` output below — after which the final step can only report "exit
+        # unknown" and the report gets a fabricated 1. Observed on the first real run.
+        set +e
+        export PATH="$CLI_BIN:$PATH"
         # opencode merges config from eight sources and a repository's own `opencode.json`
         # outranks the OPENCODE_CONFIG path. Inline content outranks the checkout, which is
         # what keeps a reviewed diff from configuring its own reviewer.
@@ -224,8 +282,15 @@ runs:
         STATUS: ${{ steps.run.outputs.exit-code }}
       run: |
         set -euo pipefail
-        if [ "${STATUS:-1}" != "0" ]; then
-          echo "::error title=opencode review failed::the run ended with exit ${STATUS:-unknown}; the report and artifact were still collected."
+        # An empty STATUS means the review step never ran at all, because an earlier step
+        # failed — a different fault from a review that ran and exited non-zero, and worth
+        # saying out loud rather than reporting as "exit unknown".
+        if [ -z "${STATUS:-}" ]; then
+          echo "::error title=opencode review did not run::an earlier step failed before the review started; the report and artifact were still collected."
+          exit 1
+        fi
+        if [ "$STATUS" != "0" ]; then
+          echo "::error title=opencode review failed::the run ended with exit $STATUS; the report and artifact were still collected."
           exit 1
         fi
         echo "opencode review completed."
