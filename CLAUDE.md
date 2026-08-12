@@ -21,6 +21,10 @@ Shared GitHub Actions reusable workflows and composite actions used across all G
   - `setup-warp/` — Cloudflare WARP in proxy mode for reaching internal services
   - `claude-observability/` — Wraps one Claude Code call: OTel, PR timeline capture,
     portable change/complexity/risk classification, JSONL evidence (Python + unit tests)
+  - `opencode-review/` — One read-only `opencode` review of a pull request on any
+    OpenAI-compatible gateway model: inline read-only config, pinned CLI, validated
+    review JSON, JSONL evidence (Python + unit tests). Sibling of the above; it
+    deliberately does not classify
 
 ## Linting and Validation
 
@@ -40,8 +44,9 @@ so a runner can execute them before any dependency install. `claude-observabilit
 unit tests — run them directly, they need nothing installed:
 
 ```bash
-ACTION=.github/actions/claude-observability
-python3 -m unittest discover -s "$ACTION" -t "$ACTION"
+for ACTION in .github/actions/claude-observability .github/actions/opencode-review; do
+  python3 -m unittest discover -s "$ACTION" -t "$ACTION"
+done
 ```
 
 ## Key Conventions

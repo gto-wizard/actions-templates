@@ -162,3 +162,86 @@ attempts per PR while still summing cost.
 
 Outputs include `change-type`, `complexity`, `risk`, `classification-status`,
 `total-cost-usd`, `session-id`, and paths to every evidence file.
+
+### `opencode-review`
+
+The sibling of `claude-observability`, for every model that is **not** Claude. It
+runs one read-only [`opencode`](https://opencode.ai) review of one pull request on
+one model served by any OpenAI-compatible gateway, and normalizes the result into a
+report, a job summary, and step outputs.
+
+Callers hardcode one model per workflow, so `kimi-pr-review.yml` and
+`deepseek-pr-review.yml` are each a trigger, a gate, a checkout, and this:
+
+```yaml
+- name: Review with Kimi
+  uses: gto-wizard/actions-templates/.github/actions/opencode-review@<full-commit-sha>
+  with:
+    pr-number: ${{ github.event.pull_request.number }}
+    model: kimi-k3
+    api-key: ${{ secrets.LITELLM_OPENCODE_REVIEW_KEY }}
+```
+
+It **deliberately does not classify.** Change type, complexity, and risk belong to
+`claude-observability`'s classifier pass, which is one model for every repository on
+purpose; a second model re-deriving them would answer one question twice. This
+action asks only for what a different *reading* of the diff produces: summary,
+rationale, verdict (`approve` / `comment` / `request_changes`), and findings
+anchored to path and line.
+
+Three things are load-bearing, because a reviewed diff is untrusted input and
+opencode is far more configurable than Claude Code:
+
+- **Config arrives inline.** opencode merges config from eight sources, and a
+  repository's own `opencode.json` outranks the `OPENCODE_CONFIG` path — a file in
+  the diff could otherwise set `permission: allow`, or repoint the provider at
+  another endpoint with the gateway key attached. The action passes its config
+  through `OPENCODE_CONFIG_CONTENT`, which outranks the checkout.
+- **`--pure`**, because `.opencode/plugin/*` is executable code loaded from the
+  working directory. The action additionally *refuses* a checkout containing
+  `opencode.json`, `opencode.jsonc`, or `.opencode/`, so a pull request that tries
+  is visible rather than merely inert.
+- **Deny-by-default permissions**, with `bash` reduced to an allowlist of read-only
+  git verbs. Writes, `webfetch`, `websearch`, and subagents are never named, so `*`
+  catches them. Verified against a real run: a denial returns an explanatory error
+  the model recovers from, it does not hang the session.
+
+The key is never written to a config file — the provider block dereferences
+`{env:OPENCODE_GATEWAY_API_KEY}`, which the run step sets from `api-key`. The action
+log shows tool *names* and per-step token counts only; tool inputs, tool results,
+and the review text stay out of it and go to the private artifact instead.
+
+Two limits are recorded rather than papered over:
+
+- **The output shape is asked for, not enforced.** opencode has no `--json-schema`,
+  so the schema goes in the prompt and is validated afterwards. A model that cannot
+  hold it yields `review: null` plus the problems found and its raw text — reported
+  as `status: error` with a warning, **not** as a failed job. For a comparison
+  between models that verdict is a result, and one model's bad answer must not paint
+  a panel red. The action fails only when `opencode` itself exits non-zero.
+- **Cost is not self-reported.** opencode prices runs from models.dev, which knows
+  nothing about a custom provider, so every event reports `cost: 0`. Tokens are
+  real; the report omits cost rather than publish a zero that reads as free, and the
+  gateway's own spend log is the source of truth. Token *fidelity* also varies by
+  route — some report no output tokens at all.
+
+`timeout-seconds` (default 900) exists because opencode documents no step,
+iteration, or tool-call limit: without it the only bound is the caller's job
+timeout, which would kill the reporting steps too. On expiry the run is interrupted
+and the partial stream is still reported — a truncated final JSONL line is tolerated.
+
+Caller requirements:
+
+- `actions/checkout` with `fetch-depth: 0` and `ref: refs/pull/<n>/head`, so
+  `base...head` can be diffed locally;
+- `permissions: pull-requests: read`, to resolve the pull request. A fork's head is
+  refused: a caller handed only a number cannot check provenance in an `if:`;
+- nothing for Python or the CLI — the action provisions Python (unless
+  `python-version: ""`) and installs the pinned opencode itself.
+
+Evidence artifact (14 days): `pr-metadata.json`, `pr.diff.patch`,
+`review-prompt.txt`, `opencode-run-report.json`, and the complete
+`opencode-events.jsonl` stream. It contains code, so it stays private and short-lived.
+
+Outputs: `verdict`, `findings`, `status`, `session-id`, `tokens-input`,
+`tokens-output`, `report-file`, `artifact-name`.
