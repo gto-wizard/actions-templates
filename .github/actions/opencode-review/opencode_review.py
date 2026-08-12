@@ -423,29 +423,6 @@ def finish_reasons(events: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-def extract_review(text: str) -> dict[str, Any] | None:
-    """The review object embedded in a free-text answer, or ``None``.
-
-    With no schema enforcement to lean on, this accepts what models actually emit — a bare
-    object, a fenced one, or an object after a paragraph of preamble — and takes the LAST
-    complete object carrying a ``summary``. Last, because a model that restates its answer
-    means the restatement; ``summary``, because a tolerant scan would otherwise happily
-    return a nested ``findings`` entry as the whole review.
-    """
-    decoder = json.JSONDecoder()
-    found: dict[str, Any] | None = None
-    for index, char in enumerate(text):
-        if char != "{":
-            continue
-        try:
-            candidate, _ = decoder.raw_decode(text, index)
-        except ValueError:
-            continue
-        if isinstance(candidate, dict) and "summary" in candidate:
-            found = candidate
-    return found
-
-
 def finding_problems(findings: object) -> list[str]:
     if not isinstance(findings, list):
         return ["findings is not a list"]
@@ -477,6 +454,47 @@ def validate_review(review: dict[str, Any]) -> list[str]:
         problems.append(f"verdict={review.get('verdict')!r} is not one of {', '.join(VERDICTS)}")
     problems.extend(finding_problems(review.get("findings")))
     return problems
+
+
+def json_objects(text: str) -> list[dict[str, Any]]:
+    """Every JSON object embedded anywhere in a free-text answer, in order of appearance."""
+    decoder = json.JSONDecoder()
+    objects: list[dict[str, Any]] = []
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(text, index)
+        except ValueError:
+            continue
+        if isinstance(candidate, dict):
+            objects.append(candidate)
+    return objects
+
+
+def extract_review(text: str) -> dict[str, Any] | None:
+    """The review object embedded in a free-text answer, or ``None``.
+
+    With no schema enforcement to lean on, this accepts what models actually emit — a bare
+    object, a fenced one, or an object after a paragraph of preamble — and prefers the LAST
+    one that actually VALIDATES. Last, because a model that restates its answer means the
+    restatement; validating, because of what `deepseek-v4-pro` did on its second real run: it
+    echoed the requested schema back around its answer, so the text ended with the schema's
+    own `properties` block — an object that has a `summary` key and is not a review. Keying
+    on "has a summary" picked that, reported three validation problems, and threw away a
+    perfectly good review that was sitting earlier in the same string.
+
+    When nothing validates, the last object that at least looks like an attempt is returned
+    so the caller can report real problems against real content instead of "no review found".
+    """
+    objects = json_objects(text)
+    for candidate in reversed(objects):
+        if not validate_review(candidate):
+            return candidate
+    for candidate in reversed(objects):
+        if isinstance(candidate.get("summary"), str):
+            return candidate
+    return None
 
 
 def read_events(path: Path) -> list[dict[str, Any]]:

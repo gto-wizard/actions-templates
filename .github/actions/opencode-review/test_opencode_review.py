@@ -80,8 +80,32 @@ class ExtractionTest(unittest.TestCase):
                 self.assertIsNotNone(review)
                 self.assertEqual(review["verdict"], expected)
 
+    def test_prefers_the_review_over_an_echoed_schema(self) -> None:
+        """What `deepseek-v4-pro` actually did on its second real run.
+
+        It answered correctly and then echoed the requested schema after it, so the last
+        object in the text was the schema's own `properties` block — which has a `summary`
+        key and is not a review. Keying on "has a summary" threw away a good review.
+        """
+        review = json.dumps(VALID_REVIEW)
+        schema_echo = json.dumps(MODULE.REVIEW_SCHEMA)
+        found = MODULE.extract_review(f"Here is the review.\n{review}\n\nSchema used:\n{schema_echo}")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["verdict"], VALID_REVIEW["verdict"])
+        self.assertEqual(found["summary"], VALID_REVIEW["summary"])
+
+    def test_falls_back_to_an_attempt_so_problems_name_real_content(self) -> None:
+        # Nothing validates, so the caller still gets the model's own object and can report
+        # what was wrong with it rather than "no review found".
+        broken = json.dumps({**VALID_REVIEW, "verdict": "ship it"})
+        found = MODULE.extract_review(f"prose {broken} more prose")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["verdict"], "ship it")
+        self.assertTrue(MODULE.validate_review(found))
+
     def test_returns_none_rather_than_a_fragment(self) -> None:
-        # A findings entry is an object too; only the one carrying `summary` is the review.
+        # A findings entry is an object too, and it validates as neither a review nor an
+        # attempt at one — nothing here should be mistaken for an answer.
         fragment = json.dumps({"severity": "info", "path": "a.py", "line": 1, "message": "m"})
         for text in ("", "Nothing wrong with this pull request.", "{not json}", fragment):
             with self.subTest(text=text[:40]):
