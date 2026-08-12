@@ -38,6 +38,7 @@ Standard library only, same as the agent actions. The metric NAME comes from
 against cannot drift apart.
 """
 
+import contextlib
 import json
 import os
 import sys
@@ -116,10 +117,8 @@ def coverage_gap(rows: list[dict]) -> tuple[int, float]:
         if any(isinstance(t, str) and t.startswith(RUN_TAG) for t in tags):
             continue
         missing += 1
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             spend += float(row.get("spend") or 0.0)
-        except (TypeError, ValueError):
-            pass
     return missing, spend
 
 
