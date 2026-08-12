@@ -706,7 +706,9 @@ def classifier_argv(
 
 def numeric_cost(result: dict[str, Any]) -> float:
     value = result.get("total_cost_usd")
-    return float(value) if isinstance(value, int | float) else 0.0
+    # Tuple form, not `int | float`: runtime unions need 3.10, and this script
+    # must run on whatever python3 a consumer's runner happens to ship.
+    return float(value) if isinstance(value, (int, float)) else 0.0
 
 
 def model_usage(result: dict[str, Any]) -> dict[str, Any]:
@@ -725,7 +727,7 @@ def merged_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
         combined[model] = {
             key: (first.get(key, 0) or 0) + (second.get(key, 0) or 0)
             for key in set(first) | set(second)
-            if isinstance(first.get(key, 0), int | float) and isinstance(second.get(key, 0), int | float)
+            if isinstance(first.get(key, 0), (int, float)) and isinstance(second.get(key, 0), (int, float))
         }
     return combined
 
