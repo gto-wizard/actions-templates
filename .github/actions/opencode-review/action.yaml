@@ -287,13 +287,15 @@ runs:
         INPUT_ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
         INPUT_METADATA_FILE: ${{ steps.prepare.outputs.metadata-file }}
         INPUT_EXECUTION_FILE: ${{ steps.run.outputs.execution-file }}
-        INPUT_EXIT_CODE: ${{ steps.run.outputs.exit-code || '1' }}
+        # Deliberately NOT defaulted: empty is the signal that the run step was killed
+        # before it could write one, which is what a cancellation looks like from here.
+        # `cancelled()` is not available to a composite action -- using it made GitHub
+        # reject this whole file with "Unrecognized function", failing every review at
+        # "Set up job".
+        INPUT_EXIT_CODE: ${{ steps.run.outputs.exit-code }}
         INPUT_MODEL: ${{ steps.prepare.outputs.model }}
         INPUT_PROVIDER_ID: ${{ inputs.provider-id }}
         INPUT_DURATION_SECONDS: ${{ steps.run.outputs.duration-seconds }}
-        # The exit code cannot carry this: a cancelled review is killed before it writes one,
-        # so the report would see the default 1 and blame the model for a re-push.
-        INPUT_CANCELLED: ${{ cancelled() }}
         INPUT_API_KEY_ALIAS: ${{ inputs.api-key-alias }}
         INPUT_DEPARTMENT: ${{ inputs.department }}
         INPUT_TEAM_ID: ${{ inputs.team-id }}
