@@ -397,15 +397,51 @@ class ClaudeArgsTest(unittest.TestCase):
         self.assertNotIn("--output-format", args)
         self.assertNotIn("--verbose", args)
 
-    def test_settings_carries_the_otel_env_and_the_classifier_role(self) -> None:
-        settings = json.loads(MODULE.claude_settings("service.namespace=gto-ai", "00-abc-def-01"))
-        self.assertEqual("1", settings["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"])
-        self.assertEqual("00-abc-def-01", settings["env"]["TRACEPARENT"])
-        self.assertEqual("service.namespace=gto-ai", settings["env"]["OTEL_RESOURCE_ATTRIBUTES"])
-        self.assertEqual("0", settings["env"]["OTEL_LOG_USER_PROMPTS"])
 
-        classifier = json.loads(MODULE.claude_settings("a=b", "tp", role="classifier"))
-        self.assertEqual("a=b,gto.agent.role=classifier", classifier["env"]["OTEL_RESOURCE_ATTRIBUTES"])
+class ActionTelemetryWiringTest(unittest.TestCase):
+    """The OTel env must be step `env:` on both invocations.
+
+    Regression from run 31588364232: the variables were passed through
+    claude-code-action's `settings` input instead. Claude Code reads telemetry
+    configuration from the process environment at startup, so native telemetry
+    silently never turned on — no claude_code.* events, no per-request token or
+    cache figures, no tool spans. Only our own summary metric survived, which is
+    exactly the signal that cannot reveal the gap.
+    """
+
+    ACTION = Path(__file__).with_name("action.yaml")
+
+    def _claude_steps(self) -> list:
+        import yaml
+
+        definition = yaml.safe_load(self.ACTION.read_text(encoding="utf-8"))
+        return [
+            step
+            for step in definition["runs"]["steps"]
+            if "claude-code-action" in str(step.get("uses", ""))
+        ]
+
+    def test_both_invocations_enable_telemetry_via_process_env(self) -> None:
+        steps = self._claude_steps()
+        self.assertEqual(2, len(steps), "expected a review and a classifier invocation")
+        for step in steps:
+            environment = step.get("env") or {}
+            self.assertEqual("1", str(environment.get("CLAUDE_CODE_ENABLE_TELEMETRY")), step.get("id"))
+            self.assertEqual("otlp", environment.get("OTEL_METRICS_EXPORTER"), step.get("id"))
+            self.assertIn("TRACEPARENT", environment, step.get("id"))
+            self.assertIn("OTEL_RESOURCE_ATTRIBUTES", environment, step.get("id"))
+            # Prompts, tool details and raw bodies stay out of telemetry.
+            for muted in ("OTEL_LOG_USER_PROMPTS", "OTEL_LOG_TOOL_DETAILS", "OTEL_LOG_RAW_API_BODIES"):
+                self.assertEqual("0", str(environment.get(muted)), f"{step.get('id')}/{muted}")
+            # And never via `settings`, which is what broke it.
+            self.assertNotIn("settings", step.get("with") or {}, step.get("id"))
+
+    def test_the_classifier_is_attributed_separately(self) -> None:
+        by_id = {step.get("id"): step for step in self._claude_steps()}
+        review = by_id["review"]["env"]["OTEL_RESOURCE_ATTRIBUTES"]
+        classifier = by_id["classify"]["env"]["OTEL_RESOURCE_ATTRIBUTES"]
+        self.assertNotEqual(review, classifier)
+        self.assertIn("classifier-resource-attributes", classifier)
 
 
 class SummaryPayloadTest(unittest.TestCase):

@@ -229,10 +229,42 @@ runs:
       id: review
       continue-on-error: true
       uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # pin@v1.0.191
+      # Claude Code reads its telemetry configuration from the process
+      # environment when it starts. These MUST be step `env:` — routing them
+      # through the action's `settings` input turns native telemetry off
+      # silently: no claude_code.* events, no per-request token/cache figures,
+      # no tool-level spans. Only our own summary metric survives that, which
+      # is the half we post ourselves and therefore the half that hides it.
+      env:
+        CLAUDE_CODE_ENABLE_TELEMETRY: "1"
+        CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1"
+        CLAUDE_CODE_PROPAGATE_TRACEPARENT: "1"
+        OTEL_METRICS_EXPORTER: otlp
+        OTEL_LOGS_EXPORTER: otlp
+        OTEL_TRACES_EXPORTER: otlp
+        OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+        OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: http/protobuf
+        OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
+        OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+        OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: cumulative
+        OTEL_METRIC_EXPORT_INTERVAL: "5000"
+        OTEL_LOGS_EXPORT_INTERVAL: "1000"
+        OTEL_TRACES_EXPORT_INTERVAL: "1000"
+        OTEL_METRICS_INCLUDE_SESSION_ID: "false"
+        OTEL_METRICS_INCLUDE_ACCOUNT_UUID: "false"
+        OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES: "true"
+        OTEL_LOG_USER_PROMPTS: "0"
+        OTEL_LOG_TOOL_DETAILS: "0"
+        OTEL_LOG_TOOL_CONTENT: "0"
+        OTEL_LOG_RAW_API_BODIES: "0"
+        OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${{ inputs.metrics-endpoint }}
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ inputs.traces-endpoint }}
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
+        OTEL_RESOURCE_ATTRIBUTES: ${{ steps.prepare.outputs.resource-attributes }}
+        TRACEPARENT: ${{ steps.prepare.outputs.traceparent }}
       with:
         prompt: ${{ inputs.prompt }}
         claude_args: ${{ steps.prepare.outputs.review-claude-args }}
-        settings: ${{ steps.prepare.outputs.claude-settings }}
         anthropic_api_key: ${{ inputs.anthropic-api-key }}
         path_to_claude_code_executable: ${{ inputs.claude-executable }}
         github_token: ${{ inputs.github-token }}
@@ -264,10 +296,36 @@ runs:
       if: always()
       continue-on-error: true
       uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # pin@v1.0.191
+      env:
+        CLAUDE_CODE_ENABLE_TELEMETRY: "1"
+        CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1"
+        CLAUDE_CODE_PROPAGATE_TRACEPARENT: "1"
+        OTEL_METRICS_EXPORTER: otlp
+        OTEL_LOGS_EXPORTER: otlp
+        OTEL_TRACES_EXPORTER: otlp
+        OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+        OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: http/protobuf
+        OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
+        OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+        OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: cumulative
+        OTEL_METRIC_EXPORT_INTERVAL: "5000"
+        OTEL_LOGS_EXPORT_INTERVAL: "1000"
+        OTEL_TRACES_EXPORT_INTERVAL: "1000"
+        OTEL_METRICS_INCLUDE_SESSION_ID: "false"
+        OTEL_METRICS_INCLUDE_ACCOUNT_UUID: "false"
+        OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES: "true"
+        OTEL_LOG_USER_PROMPTS: "0"
+        OTEL_LOG_TOOL_DETAILS: "0"
+        OTEL_LOG_TOOL_CONTENT: "0"
+        OTEL_LOG_RAW_API_BODIES: "0"
+        OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${{ inputs.metrics-endpoint }}
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ inputs.traces-endpoint }}
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
+        OTEL_RESOURCE_ATTRIBUTES: ${{ steps.prepare.outputs.classifier-resource-attributes }}
+        TRACEPARENT: ${{ steps.prepare.outputs.traceparent }}
       with:
         prompt: ${{ steps.prepare.outputs.classifier-prompt }}
         claude_args: ${{ steps.prepare.outputs.classifier-claude-args }}
-        settings: ${{ steps.prepare.outputs.classifier-settings }}
         anthropic_api_key: ${{ inputs.anthropic-api-key }}
         path_to_claude_code_executable: ${{ inputs.claude-executable }}
         github_token: ${{ inputs.github-token }}

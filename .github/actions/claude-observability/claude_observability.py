@@ -416,10 +416,12 @@ def prepare() -> int:
     # so the composite steps stay declarative and the CLI contract has a single
     # owner instead of being spread across YAML expressions.
     traceparent = metadata["trace"]["traceparent"]
-    append_multiline_output("claude-settings", claude_settings(resource_attributes, traceparent))
-    append_multiline_output(
-        "classifier-settings", claude_settings(resource_attributes, traceparent, role="classifier")
-    )
+    # Emitted as individual values, not a settings JSON blob: Claude Code reads
+    # its telemetry configuration from the PROCESS environment at startup, so
+    # these have to be step `env:` on the invocation. Passing them through
+    # claude-code-action's `settings` silently disabled native telemetry
+    # entirely — no claude_code.* events, no token/cache/tool metrics.
+    append_output("classifier-resource-attributes", f"{resource_attributes},gto.agent.role=classifier")
     append_multiline_output("review-claude-args", review_claude_args())
     append_multiline_output("classifier-claude-args", classifier_claude_args(artifact_dir))
     append_multiline_output(
@@ -581,49 +583,6 @@ Return exactly one risk based on how many things can break and the consequence i
 - risky: any security/auth/permission/secret boundary, money or billing flow, core product selling point, production data integrity or migration, infrastructure/trust boundary, irreversible external side effect, wide user impact, or failure likely to stay hidden
 
 Risk is max-by-dimension, not an average: one risky dimension makes the PR risky. A one-line payment or authentication change is still risky. Complexity and risk must be judged separately: a hard internal refactor can be safe, and a light code change can be risky. Keep every rationale concise and evidence-based."""
-
-
-def base_otel_env(resource_attributes: str, traceparent: str, *, role: str = "") -> dict[str, str]:
-    """Claude's native OTel environment, as a `settings.env` block for the action.
-
-    claude-code-action forwards `settings` to the CLI, so this is how the beta
-    trace and per-signal exporter variables reach the process. They used to be
-    passed as step `env:` when we exec'd the CLI ourselves; routing them through
-    `settings` keeps them attached to the invocation rather than the job.
-    """
-    attributes = resource_attributes
-    if role:
-        attributes = f"{attributes},gto.agent.role={role}" if attributes else f"gto.agent.role={role}"
-    return {
-        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
-        "CLAUDE_CODE_PROPAGATE_TRACEPARENT": "1",
-        "OTEL_METRICS_EXPORTER": "otlp",
-        "OTEL_LOGS_EXPORTER": "otlp",
-        "OTEL_TRACES_EXPORTER": "otlp",
-        "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-        "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf",
-        "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/protobuf",
-        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
-        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
-        "OTEL_METRIC_EXPORT_INTERVAL": "5000",
-        "OTEL_LOGS_EXPORT_INTERVAL": "1000",
-        "OTEL_TRACES_EXPORT_INTERVAL": "1000",
-        "OTEL_METRICS_INCLUDE_SESSION_ID": "false",
-        "OTEL_METRICS_INCLUDE_ACCOUNT_UUID": "false",
-        "OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES": "true",
-        "OTEL_LOG_USER_PROMPTS": "0",
-        "OTEL_LOG_TOOL_DETAILS": "0",
-        "OTEL_LOG_TOOL_CONTENT": "0",
-        "OTEL_LOG_RAW_API_BODIES": "0",
-        "OTEL_RESOURCE_ATTRIBUTES": attributes,
-        "TRACEPARENT": traceparent,
-    }
-
-
-def claude_settings(resource_attributes: str, traceparent: str, *, role: str = "") -> str:
-    """The `settings` input value for one claude-code-action invocation."""
-    return json.dumps({"env": base_otel_env(resource_attributes, traceparent, role=role)}, separators=(",", ":"))
 
 
 def review_claude_args() -> str:
