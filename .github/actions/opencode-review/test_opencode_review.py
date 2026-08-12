@@ -212,6 +212,7 @@ class ReportTest(unittest.TestCase):
                 self.assertEqual(session["raw_answer"], text)
 
     def test_is_an_error_when_opencode_itself_failed(self) -> None:
+        """A timed-out run is an error even if a parseable answer arrived earlier in its stream."""
         report = MODULE.build_report(
             METADATA,
             events(text=json.dumps(VALID_REVIEW)),
@@ -221,6 +222,46 @@ class ReportTest(unittest.TestCase):
         )
         self.assertTrue(report["session"]["is_error"])
         self.assertEqual(report["session"]["exit_code"], 124)
+
+
+class RunStatusTest(unittest.TestCase):
+    """A model failing and a run being taken away from it are different facts."""
+
+    def test_separates_the_four_outcomes(self) -> None:
+        cases = (
+            ({"exit_code": 0, "valid": True, "cancelled": False}, "success"),
+            # The model answered in the wrong shape — its fault, and a distinct outcome from
+            # opencode exiting non-zero.
+            ({"exit_code": 0, "valid": False, "cancelled": False}, "unusable"),
+            ({"exit_code": 1, "valid": False, "cancelled": False}, "error"),
+            ({"exit_code": 124, "valid": False, "cancelled": False}, "timeout"),
+            # Cancellation wins over the exit code, because the exit code is the default 1 the
+            # report falls back to when the review step never got to write one.
+            ({"exit_code": 1, "valid": False, "cancelled": True}, "cancelled"),
+            ({"exit_code": 0, "valid": True, "cancelled": True}, "cancelled"),
+        )
+        for kwargs, expected in cases:
+            with self.subTest(**kwargs):
+                self.assertEqual(MODULE.run_status(**kwargs), expected)
+
+    def test_a_cancelled_run_does_not_blame_the_model(self) -> None:
+        """Observed: a re-push cancelled four reviewers and all four recorded `unusable`."""
+        report = MODULE.build_report(
+            METADATA,
+            events(text="I was still working when"),
+            model="glm-5.2",
+            provider="gtowizard",
+            exit_code=1,
+            cancelled=True,
+        )
+        session = report["session"]
+        self.assertEqual(session["status"], "cancelled")
+        self.assertEqual(session["review_problems"], ["the run was cancelled before the model finished answering"])
+        with mock.patch.dict(MODULE.os.environ, {}, clear=False):
+            attributes = MODULE.telemetry_attributes(report)
+        # Not "unusable": that would be a fake data point in the model comparison.
+        self.assertEqual(attributes["gto.review.verdict"], "cancelled")
+        self.assertIs(attributes["review.success"], False)
 
 
 class SummaryTest(unittest.TestCase):
@@ -338,7 +379,17 @@ class TelemetryTest(unittest.TestCase):
         self.assertNotIn("gto.review.cost_usd", attributes)
 
     def test_an_unusable_review_is_still_reported_as_a_dimension(self) -> None:
-        attributes = MODULE.telemetry_attributes(self._report(review=None, status="error", is_error=True))
+        # Built from a real unusable answer rather than by hand-setting the status, so the
+        # fallback chain review -> status is actually exercised.
+        report = MODULE.build_report(
+            {**METADATA, "run_id": "1", "run_attempt": "1"},
+            events(text="I looked at it and it seems fine to me."),
+            model="kimi-k3",
+            provider="gtowizard",
+            exit_code=0,
+        )
+        attributes = MODULE.telemetry_attributes(report)
+        self.assertEqual(report["session"]["status"], "unusable")
         self.assertEqual(attributes["gto.review.verdict"], "unusable")
         self.assertIs(attributes["review.success"], False)
 

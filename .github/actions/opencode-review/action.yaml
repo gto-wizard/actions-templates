@@ -291,6 +291,9 @@ runs:
         INPUT_MODEL: ${{ steps.prepare.outputs.model }}
         INPUT_PROVIDER_ID: ${{ inputs.provider-id }}
         INPUT_DURATION_SECONDS: ${{ steps.run.outputs.duration-seconds }}
+        # The exit code cannot carry this: a cancelled review is killed before it writes one,
+        # so the report would see the default 1 and blame the model for a re-push.
+        INPUT_CANCELLED: ${{ cancelled() }}
         INPUT_API_KEY_ALIAS: ${{ inputs.api-key-alias }}
         INPUT_DEPARTMENT: ${{ inputs.department }}
         INPUT_TEAM_ID: ${{ inputs.team-id }}

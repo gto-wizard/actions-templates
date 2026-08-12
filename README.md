@@ -261,3 +261,11 @@ spend log for `api-key-alias` is the source of truth. Every signal carries
 `vcs.change.ref` (`gto-brain#182`) — filter on that, never on the bare number, which
 collides across repositories. Any endpoint set to an empty string skips that signal,
 and an unreachable collector warns without changing the review's verdict.
+
+`review.status` is one of **`success`**, **`unusable`** (the model answered in the
+wrong shape — its fault), **`error`** (opencode exited non-zero), **`timeout`**, or
+**`cancelled`**. Cancellation cannot be read from the exit code — the review is killed
+before it writes one — so it is passed in separately. That matters because
+`concurrency: cancel-in-progress` means every re-push cancels the previous panel, and
+without the distinction each push would manufacture a fake "this model cannot answer"
+data point.
