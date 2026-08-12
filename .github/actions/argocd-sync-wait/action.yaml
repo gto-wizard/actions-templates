@@ -31,8 +31,9 @@ inputs:
       Pass --prune to `argocd app sync`, so resources dropped from git are deleted
       instead of left behind. Intended as a one-shot: set it true, run one deploy to
       clear the orphan, then set it back to false rather than leaving CI-driven
-      deletion permanently on. Only the exact string "true" enables it — see the
-      DEADLOCK note on the sync step.
+      deletion permanently on. Only the exact string "true" enables it. Applies to
+      EVERY app in ARGOCD_APP_NAMES, not a targeted one — see the DEADLOCK note on
+      the sync step.
   ARGOCD_AUTH_TOKEN:
     required: true
     description: Argocd cli user auth token.
@@ -80,7 +81,7 @@ runs:
         # subsequent deploy then applies cleanly, reports Healthy, and still burns
         # the full WAIT_TIMEOUT_SECONDS before terminate-op and exit 1 — the app is
         # fine, only the gate fails. One orphan reddens CI on every merge until a
-        # human prunes by hand (OPS-1010: gto-brain, ~6 consecutive runs).
+        # human prunes by hand.
         #
         # Opt-in rather than always-on: --prune here would hand every caller
         # automatic deletion of anything removed from git, which is exactly what the
