@@ -122,55 +122,68 @@ runs:
         INPUT_EXTRA_INSTRUCTIONS: ${{ inputs.extra-instructions }}
       run: python3 "${{ github.action_path }}/opencode_review.py" prepare
 
-    # `opencode.ai/install` is a 307 to raw.githubusercontent.com, which rate-limits per IP —
-    # and every reviewer in a panel shares one NAT egress. Measured on the first real
-    # four-model run: two jobs had the connection reset 530ms in (curl 56) while a third spent
-    # 69s downloading successfully. Which jobs lose is arbitrary, so the fix is to stop
-    # fetching at all: the binary is cached by version, and only a cold cache touches
-    # the network. It also turns a 69-second step into about two.
-    - name: Restore the pinned opencode CLI
+    # The published binary, straight from the release CDN. Measured on the ARC fleet:
+    #
+    #   curl | bash installer      69s, or a connection reset at 0.53s
+    #   docker pull from ghcr.io    2.8s
+    #   this release asset         0.42s for all 60MB
+    #
+    # The installer was never the right primitive: `opencode.ai/install` is a 307 to
+    # raw.githubusercontent.com, which rate-limits per IP, and every reviewer in a panel
+    # shares one NAT egress — two of four jobs had the connection reset mid-body while a
+    # third spent 69 seconds on the same file. Release assets come from
+    # release-assets.githubusercontent.com, which is built for exactly this.
+    #
+    # The `ghcr.io/anomalyco/opencode` image is real and pullable in 2.8s, but it is Alpine
+    # with no git, no node and no python3: a review whose first move is `git diff base...head`
+    # cannot run inside it, and its musl binary is not the one to put on a glibc host — the
+    # release ships separate `-musl` variants precisely because they are not interchangeable.
+    #
+    # No cache layer either, deliberately: restoring 60MB from the Actions cache costs more
+    # than 0.42s of download. Do not "optimize" this back into a cache without re-measuring.
+    - name: Install the pinned opencode CLI
       id: cli
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # pin@v4
-      with:
-        path: ${{ runner.temp }}/opencode-cli
-        key: opencode-${{ inputs.opencode-version }}-${{ runner.os }}-${{ runner.arch }}
-
-    - name: Install opencode (pinned)
-      if: steps.cli.outputs.cache-hit != 'true'
       shell: bash
       env:
-        # The installer hardcodes $HOME/.opencode/bin, so HOME is how the install location is
-        # chosen. Deliberately NOT the per-model review home: the binary is identical for every
-        # model, and keying a cache per model would mean four cold downloads instead of one.
-        # The review still runs under its own isolated HOME — see the run step.
-        HOME: ${{ runner.temp }}/opencode-cli
         VERSION: ${{ inputs.opencode-version }}
+        CLI_DIR: ${{ runner.temp }}/opencode-cli
       run: |
         set -euo pipefail
-        mkdir -p "$HOME"
-        # Retried anyway, for the cold-cache case that still races its siblings.
-        for attempt in 1 2 3 4 5; do
-          if curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 \
-            https://opencode.ai/install | bash; then
-            break
-          fi
-          if [ "$attempt" = "5" ]; then
-            echo "::error title=opencode install failed::5 attempts against opencode.ai/install"
-            exit 1
-          fi
-          echo "install attempt $attempt failed; retrying in $((attempt * 5))s"
-          sleep "$((attempt * 5))"
-        done
-
-    # Runs on a cache hit too: a restored binary that will not exec is worth finding here
-    # rather than inside the review step.
-    - name: Verify the CLI
-      shell: bash
-      env:
-        CLI_HOME: ${{ runner.temp }}/opencode-cli
-      run: |
-        set -euo pipefail
-        "$CLI_HOME/.opencode/bin/opencode" --version
+        case "$RUNNER_ARCH" in
+          X64) arch=x64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "::error::unsupported runner architecture $RUNNER_ARCH"; exit 1 ;;
+        esac
+        case "$RUNNER_OS" in
+          Linux)
+            os=linux
+            extension=tar.gz
+            # The release ships glibc and musl builds as separate assets. Ask the runner which
+            # it is rather than assuming Ubuntu: an Alpine-based fleet would silently get a
+            # binary that cannot exec.
+            if ldd --version 2>&1 | grep -qi musl; then libc=-musl; else libc=""; fi
+            ;;
+          macOS) os=darwin; extension=zip; libc="" ;;
+          *) echo "::error::unsupported runner OS $RUNNER_OS"; exit 1 ;;
+        esac
+        asset="opencode-${os}-${arch}${libc}.${extension}"
+        url="https://github.com/anomalyco/opencode/releases/download/v${VERSION}/${asset}"
+        mkdir -p "$CLI_DIR"
+        echo "Fetching $asset"
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 15 \
+          -o "$CLI_DIR/$asset" "$url"
+        case "$extension" in
+          tar.gz) tar -xzf "$CLI_DIR/$asset" -C "$CLI_DIR" ;;
+          zip) unzip -qo "$CLI_DIR/$asset" -d "$CLI_DIR" ;;
+        esac
+        rm -f "$CLI_DIR/$asset"
+        # The archive holds a bare `opencode` at its root today. Locate it rather than trust
+        # that: a layout change would otherwise surface as a confusing PATH error later.
+        binary="$(find "$CLI_DIR" -maxdepth 3 -type f -name opencode -print -quit)"
+        [ -n "$binary" ] || { echo "::error::no opencode binary inside $asset"; exit 1; }
+        chmod +x "$binary"
+        echo "bin-dir=$(dirname "$binary")" >> "$GITHUB_OUTPUT"
+        "$binary" --version
 
     # `continue-on-error` does not exist for composite steps, so the exit code is captured
     # here and acted on by the last step. Everything between them is reporting, and reporting
@@ -182,7 +195,7 @@ runs:
         # The review's own HOME — config discovery and session state — separate from where
         # the shared binary lives.
         HOME: ${{ steps.prepare.outputs.home-dir }}
-        CLI_HOME: ${{ runner.temp }}/opencode-cli
+        CLI_BIN: ${{ steps.cli.outputs.bin-dir }}
         ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
         PROMPT_FILE: ${{ steps.prepare.outputs.prompt-file }}
         CONFIG_FILE: ${{ steps.prepare.outputs.config-file }}
@@ -199,7 +212,7 @@ runs:
         # the `exit-code` output below — after which the final step can only report "exit
         # unknown" and the report gets a fabricated 1. Observed on the first real run.
         set +e
-        export PATH="$CLI_HOME/.opencode/bin:$PATH"
+        export PATH="$CLI_BIN:$PATH"
         # opencode merges config from eight sources and a repository's own `opencode.json`
         # outranks the OPENCODE_CONFIG path. Inline content outranks the checkout, which is
         # what keeps a reviewed diff from configuring its own reviewer.
