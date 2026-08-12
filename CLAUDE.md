@@ -21,6 +21,9 @@ Shared GitHub Actions reusable workflows and composite actions used across all G
   - `setup-warp/` — Cloudflare WARP in proxy mode for reaching internal services
   - `claude-observability/` — Wraps one Claude Code call: OTel, PR timeline capture,
     portable change/complexity/risk classification, JSONL evidence (Python + unit tests)
+  - `shared/` — `gto_otlp.py`: the OTLP encoding, transport, and pull-request identifier both
+    review actions emit. Imported by sibling path; it has no suite of its own, so a change to
+    it runs both action suites via pre-commit
   - `opencode-review/` — One read-only `opencode` review of a pull request on any
     OpenAI-compatible gateway model: inline read-only config, pinned CLI, validated
     review JSON, JSONL evidence (Python + unit tests). Sibling of the above; it

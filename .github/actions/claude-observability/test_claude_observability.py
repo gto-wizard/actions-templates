@@ -12,6 +12,24 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+class ChangeRefTest(unittest.TestCase):
+    """The dimension a dashboard filters on has to be unambiguous on its own."""
+
+    def test_qualifies_the_number_with_the_repository(self) -> None:
+        self.assertEqual(MODULE.change_ref("gto-wizard/gto-brain", 182), "gto-brain#182")
+        self.assertEqual(MODULE.change_ref("gto-wizard/gto-universe", "5813"), "gto-universe#5813")
+
+    def test_two_repositories_never_share_a_reference(self) -> None:
+        # The bug this exists to prevent: `pr=182` summing two repositories as one PR.
+        self.assertNotEqual(
+            MODULE.change_ref("gto-wizard/gto-brain", 182),
+            MODULE.change_ref("gto-wizard/gto-universe", 182),
+        )
+
+    def test_tolerates_a_repository_without_an_owner(self) -> None:
+        self.assertEqual(MODULE.change_ref("bare-repo", 7), "bare-repo#7")
+
+
 class ClassificationTest(unittest.TestCase):
     def test_accepts_orthogonal_complexity_and_risk(self) -> None:
         value = {

@@ -294,6 +294,112 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("Do not produce them.", prompt)
 
 
+class TelemetryTest(unittest.TestCase):
+    """Four of five reviewers were invisible in Grafana until this existed."""
+
+    def _report(self, **overrides):
+        report = MODULE.build_report(
+            {**METADATA, "run_id": "31626101260", "run_attempt": "2", "head_ref": "feat/x"},
+            events(text=json.dumps(VALID_REVIEW)),
+            model="kimi-k3",
+            provider="gtowizard",
+            exit_code=0,
+        )
+        report["session"].update(overrides)
+        return report
+
+    def test_carries_a_pull_request_reference_that_cannot_collide(self) -> None:
+        attributes = MODULE.telemetry_attributes(self._report())
+        # The whole point: `181` alone would merge two repositories in one dashboard filter.
+        self.assertEqual(attributes["vcs.change.ref"], "gto-brain#181")
+        self.assertEqual(attributes["vcs.change.number"], 181)
+        self.assertNotEqual(
+            attributes["vcs.change.ref"],
+            MODULE.change_ref("gto-wizard/gto-universe", 181),
+        )
+
+    def test_dimensions_match_the_claude_action_so_runners_are_comparable(self) -> None:
+        attributes = MODULE.telemetry_attributes(self._report())
+        for shared in (
+            "github.repository",
+            "github.run.id",
+            "vcs.change.ref",
+            "vcs.change.author",
+            "gto.api_key.alias",
+            "department",
+            "team.id",
+            "model",
+            "review.status",
+        ):
+            self.assertIn(shared, attributes)
+        # Runner is what tells the two apart in a shared panel.
+        self.assertEqual(attributes["gto.review.runner"], "opencode")
+        # And cost is absent on purpose: opencode reports 0 for a custom provider.
+        self.assertNotIn("gto.review.cost_usd", attributes)
+
+    def test_an_unusable_review_is_still_reported_as_a_dimension(self) -> None:
+        attributes = MODULE.telemetry_attributes(self._report(review=None, status="error", is_error=True))
+        self.assertEqual(attributes["gto.review.verdict"], "unusable")
+        self.assertIs(attributes["review.success"], False)
+
+    def test_a_dead_collector_warns_and_never_raises(self) -> None:
+        environment = {
+            "INPUT_METRICS_ENDPOINT": "http://127.0.0.1:1/v1/metrics",
+            "INPUT_LOGS_ENDPOINT": "",
+            "INPUT_TRACES_ENDPOINT": "",
+        }
+        with mock.patch.dict(MODULE.os.environ, environment, clear=False):
+            failures = MODULE.emit_telemetry(
+                self._report(), observed_at_unix_nano=1_700_000_000_000_000_000, duration_nanos=1
+            )
+        # Reporting never decides whether a review passed.
+        self.assertEqual(len(failures), 1)
+        self.assertTrue(failures[0].startswith("metrics:"))
+
+    def test_skips_a_signal_whose_endpoint_is_empty(self) -> None:
+        with mock.patch.dict(
+            MODULE.os.environ,
+            {"INPUT_METRICS_ENDPOINT": "", "INPUT_LOGS_ENDPOINT": "", "INPUT_TRACES_ENDPOINT": ""},
+            clear=False,
+        ):
+            self.assertEqual(
+                MODULE.emit_telemetry(
+                    self._report(), observed_at_unix_nano=1_700_000_000_000_000_000, duration_nanos=1
+                ),
+                [],
+            )
+
+    def test_tokens_are_one_metric_with_a_kind_rather_than_four_names(self) -> None:
+        posted = []
+        with (
+            mock.patch.dict(
+                MODULE.os.environ,
+                {
+                    "INPUT_METRICS_ENDPOINT": "http://collector/v1/metrics",
+                    "INPUT_LOGS_ENDPOINT": "",
+                    "INPUT_TRACES_ENDPOINT": "",
+                },
+                clear=False,
+            ),
+            mock.patch.object(MODULE, "post_json", lambda endpoint, payload: posted.append(payload)),
+        ):
+            MODULE.emit_telemetry(
+                self._report(), observed_at_unix_nano=1_700_000_000_000_000_000, duration_nanos=1
+            )
+        metrics = posted[0]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+        names = {m["name"] for m in metrics}
+        self.assertEqual(names, {"gto_opencode_pr_review_tokens", "gto_opencode_pr_review_findings"})
+        kinds = {
+            attribute["value"]["stringValue"]
+            for m in metrics
+            if m["name"].endswith("_tokens")
+            for point in m["gauge"]["dataPoints"]
+            for attribute in point["attributes"]
+            if attribute["key"] == "kind"
+        }
+        self.assertEqual(kinds, {"input", "output", "reasoning", "cache_read"})
+
+
 class WorkspaceGuardTest(unittest.TestCase):
     def test_refuses_a_checkout_that_configures_its_own_reviewer(self) -> None:
         for name in MODULE.FORBIDDEN_CONFIG_PATHS:

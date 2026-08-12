@@ -25,8 +25,20 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+# The OTLP wire is shared with `opencode-review`: both actions feed one dashboard, so the
+# encoding, the transport and the pull-request identifier have a single owner. For a `uses:`
+# reference GitHub checks out the whole repository, so this sibling path resolves on a runner
+# and in the unit tests alike.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+
+from gto_otlp import (  # noqa: E402 - sys.path must be set before this import
+    change_ref,
+    otel_attributes,
+    post_json,
+    resource_attribute_env,
+)
 
 SCHEMA_VERSION = 1
 
@@ -394,6 +406,8 @@ def prepare() -> int:
         "github.run.attempt": run_attempt,
         "github.actor": metadata["github"]["actor"],
         "vcs.change.number": number,
+        # Qualified, because `number` alone collides across repositories — see `change_ref`.
+        "vcs.change.ref": change_ref(repository, number),
         "vcs.change.title": metadata["pull_request"]["title"],
         "vcs.change.url": metadata["pull_request"]["url"],
         "vcs.change.author": metadata["pull_request"]["author"],
@@ -402,9 +416,7 @@ def prepare() -> int:
         "vcs.ref.base.revision": metadata["pull_request"]["base_sha"],
         "sample": "always",
     }
-    resource_attributes = ",".join(
-        f"{key}={quote(str(value), safe='-._~')}" for key, value in attrs.items() if str(value)
-    )
+    resource_attributes = resource_attribute_env(attrs)
     artifact_name = safe_slug(f"claude-pr-{repository}-{number}-{run_id}-{run_attempt}-{invocation}")
     append_output("artifact-dir", str(artifact_dir))
     append_output("artifact-name", artifact_name)
@@ -688,34 +700,6 @@ def merged_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
     return combined
 
 
-def otel_value(value: object) -> dict[str, object]:
-    if isinstance(value, bool):
-        return {"boolValue": value}
-    if isinstance(value, int):
-        return {"intValue": str(value)}
-    if isinstance(value, float):
-        return {"doubleValue": value}
-    return {"stringValue": str(value)}
-
-
-def otel_attributes(values: dict[str, object]) -> list[dict[str, object]]:
-    return [{"key": key, "value": otel_value(value)} for key, value in values.items()]
-
-
-def post_json(endpoint: str, payload: dict[str, Any]) -> None:
-    if not endpoint:
-        return
-    request = Request(
-        endpoint,
-        data=json.dumps(payload, separators=(",", ":")).encode(),
-        headers={"content-type": "application/json"},
-        method="POST",
-    )
-    with urlopen(request, timeout=15) as response:  # noqa: S310 - endpoints are workflow-controlled
-        if not 200 <= response.status < 300:
-            raise RuntimeError(f"OTLP endpoint returned HTTP {response.status}")
-
-
 def build_summary_payloads(
     metadata: dict[str, Any], report: dict[str, Any], *, observed_at_unix_nano: int
 ) -> dict[str, dict[str, Any]]:
@@ -729,6 +713,7 @@ def build_summary_payloads(
         "github.run.attempt": metadata["github"]["run_attempt"],
         "gto.review.invocation": metadata["github"]["invocation"],
         "vcs.change.number": metadata["pull_request"]["number"],
+        "vcs.change.ref": change_ref(metadata["github"]["repository"], metadata["pull_request"]["number"]),
         "vcs.change.title": metadata["pull_request"]["title"],
         "vcs.change.url": metadata["pull_request"]["url"],
         "vcs.change.author": metadata["pull_request"]["author"],
