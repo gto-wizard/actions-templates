@@ -48,8 +48,8 @@ from gto_otlp import (  # noqa: E402 - sys.path must be set before this import
     metrics_envelope,
     new_trace_ids,
     post_json,
-    review_attributes,
-    review_metrics,
+    agent_attributes,
+    agent_metrics,
     span_envelope,
 )
 
@@ -715,8 +715,9 @@ def telemetry_attributes(report: dict[str, Any]) -> dict[str, object]:
     session = report["session"]
     review = session.get("review") or {}
     return {
-        **review_attributes(
+        **agent_attributes(
             runner="opencode",
+            task="pr_review",
             model=f"{runner['provider']}/{runner['model']}",
             repository=str(metadata.get("repository", "")),
             change_number=metadata.get("pr_number", ""),
@@ -770,7 +771,7 @@ def emit_telemetry(report: dict[str, Any], *, observed_at_unix_nano: int, durati
     # work either — they are per-message, not per-session, and reconcile ~4x low against the
     # gateway's own booking. The gateway is the authority; `x-litellm-tags` carries the run
     # id so it can be joined back to these series.
-    metrics = review_metrics(
+    metrics = agent_metrics(
         attributes,
         observed_at_unix_nano=observed_at_unix_nano,
         tokens={kind: tokens[kind] for kind in ("input", "output", "reasoning", "cache_read")},

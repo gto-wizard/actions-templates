@@ -1,0 +1,52 @@
+name: Gateway spend export
+description: Republish what the LLM gateway billed for each AI agent run, joined by GitHub run id
+
+# Not part of the agent actions themselves, and not because it would be inconvenient: the
+# gateway's spend log is admin-only, an agent's own CI key is refused (401), and a per-key
+# delta cannot work when several agents share a key and run in parallel. So the number has
+# to be fetched afterwards, by something holding a different credential.
+
+inputs:
+  api-key:
+    description: >-
+      A LiteLLM `proxy_admin_viewer` key. Restrict it to a non-existent model list so it
+      cannot run inference: verified that such a key reads /spend/logs/ui (200) and is
+      refused when minting a key (403) or calling completions (403). Never the master key --
+      this action only ever reads.
+    required: true
+  admin-url:
+    description: LiteLLM admin base URL. Reachable in-cluster only.
+    required: false
+    default: https://llm-admin.services.gtowiz.com
+  metrics-endpoint:
+    description: OTLP/HTTP metrics endpoint. Cluster-local, which is why this runs on an in-cluster runner.
+    required: false
+    default: http://alloy-alloy-general.alloy.svc.cluster.local:4318/v1/metrics
+  since-hours:
+    description: >-
+      How far back to read. Deliberately wider than any caller's schedule so a run landing
+      between two ticks is still picked up; re-emitting an identical gauge is idempotent.
+    required: false
+    default: "48"
+  python-version:
+    description: Python to set up. Empty uses whatever the runner already has.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      if: inputs.python-version != ''
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # pin@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Export gateway spend
+      shell: bash
+      env:
+        LITELLM_SPEND_VIEWER_KEY: ${{ inputs.api-key }}
+        LITELLM_ADMIN_URL: ${{ inputs.admin-url }}
+        METRICS_ENDPOINT: ${{ inputs.metrics-endpoint }}
+        SINCE_HOURS: ${{ inputs.since-hours }}
+      run: python3 "${{ github.action_path }}/gateway_spend_export.py"

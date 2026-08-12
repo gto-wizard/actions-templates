@@ -27,6 +27,7 @@ SHARED_KEYS = {
     "vcs.ref.head.revision",
     "vcs.ref.base.revision",
     "gto.review.runner",
+    "gto.ai.task",
     "gto.api_key.alias",
     "gto.code.areas",
     "department",
@@ -45,9 +46,10 @@ def attributes(**overrides):
         change_number=182,
         status="success",
         success=True,
+        task="pr_review",
     )
     base.update(overrides)
-    return MODULE.review_attributes(**base)
+    return MODULE.agent_attributes(**base)
 
 
 class ReviewAttributesTest(unittest.TestCase):
@@ -67,46 +69,46 @@ class ReviewAttributesTest(unittest.TestCase):
 
 class ReviewMetricsTest(unittest.TestCase):
     def _names(self, **kwargs):
-        metrics = MODULE.review_metrics(
+        metrics = MODULE.agent_metrics(
             attributes(), observed_at_unix_nano=1_700_000_000_000_000_000, **kwargs
         )
         return [m["name"] for m in metrics]
 
     def test_a_run_always_counts_even_with_nothing_else_to_report(self) -> None:
         # Counting runs must not mean "runs whose runner happened to know its own price".
-        self.assertEqual([MODULE.REVIEW_METRIC_RUNS], self._names())
+        self.assertEqual([MODULE.AGENT_METRIC_RUNS], self._names())
 
     def test_cost_is_absent_rather_than_zero_when_unknown(self) -> None:
-        self.assertNotIn(MODULE.REVIEW_METRIC_COST, self._names(tokens={"input": 5}))
+        self.assertNotIn(MODULE.AGENT_METRIC_COST, self._names(tokens={"input": 5}))
 
     def test_zero_cost_is_still_emitted_when_the_runner_reports_it(self) -> None:
         # None means "cannot say"; 0.0 is a claim, and a claim gets published.
-        self.assertIn(MODULE.REVIEW_METRIC_COST, self._names(cost_usd=0.0))
+        self.assertIn(MODULE.AGENT_METRIC_COST, self._names(cost_usd=0.0))
 
     def test_both_runners_reach_the_same_names(self) -> None:
         claude = self._names(cost_usd=1.25)
         opencode = self._names(tokens={"input": 1, "output": 2}, findings=3)
-        self.assertEqual([MODULE.REVIEW_METRIC_RUNS, MODULE.REVIEW_METRIC_COST], claude)
+        self.assertEqual([MODULE.AGENT_METRIC_RUNS, MODULE.AGENT_METRIC_COST], claude)
         self.assertEqual(
-            [MODULE.REVIEW_METRIC_RUNS] + [MODULE.REVIEW_METRIC_TOKENS] * 2 + [MODULE.REVIEW_METRIC_FINDINGS],
+            [MODULE.AGENT_METRIC_RUNS] + [MODULE.AGENT_METRIC_TOKENS] * 2 + [MODULE.AGENT_METRIC_FINDINGS],
             opencode,
         )
-        self.assertEqual(MODULE.REVIEW_METRIC_RUNS, claude[0])
+        self.assertEqual(MODULE.AGENT_METRIC_RUNS, claude[0])
 
     def test_duration_is_reported_by_every_runner(self) -> None:
         # The one economic axis on which all five reviewers are comparable today, since
         # only Claude can report a price.
         for kwargs in ({"cost_usd": 1.0}, {"tokens": {"input": 1}, "findings": 0}):
             with self.subTest(**kwargs):
-                self.assertIn(MODULE.REVIEW_METRIC_DURATION, self._names(duration_seconds=42.5, **kwargs))
+                self.assertIn(MODULE.AGENT_METRIC_DURATION, self._names(duration_seconds=42.5, **kwargs))
 
     def test_duration_is_a_double_so_sub_second_runs_are_not_floored(self) -> None:
-        metrics = MODULE.review_metrics(attributes(), observed_at_unix_nano=1, duration_seconds=0.75)
-        point = next(m for m in metrics if m["name"] == MODULE.REVIEW_METRIC_DURATION)
+        metrics = MODULE.agent_metrics(attributes(), observed_at_unix_nano=1, duration_seconds=0.75)
+        point = next(m for m in metrics if m["name"] == MODULE.AGENT_METRIC_DURATION)
         self.assertEqual(0.75, point["gauge"]["dataPoints"][0]["asDouble"])
 
     def test_token_kind_rides_as_a_label_not_a_metric_name(self) -> None:
-        metrics = MODULE.review_metrics(
+        metrics = MODULE.agent_metrics(
             attributes(),
             observed_at_unix_nano=1,
             tokens={"input": 10, "cache_read": 20},
@@ -114,7 +116,7 @@ class ReviewMetricsTest(unittest.TestCase):
         kinds = {
             attribute["value"]["stringValue"]
             for metric in metrics
-            if metric["name"] == MODULE.REVIEW_METRIC_TOKENS
+            if metric["name"] == MODULE.AGENT_METRIC_TOKENS
             for point in metric["gauge"]["dataPoints"]
             for attribute in point["attributes"]
             if attribute["key"] == "kind"
@@ -122,13 +124,13 @@ class ReviewMetricsTest(unittest.TestCase):
         self.assertEqual({"input", "cache_read"}, kinds)
 
     def test_cost_is_a_double_and_counts_are_ints(self) -> None:
-        metrics = MODULE.review_metrics(
+        metrics = MODULE.agent_metrics(
             attributes(), observed_at_unix_nano=1, cost_usd=1.5, findings=2
         )
         by_name = {m["name"]: m["gauge"]["dataPoints"][0] for m in metrics}
-        self.assertEqual(1.5, by_name[MODULE.REVIEW_METRIC_COST]["asDouble"])
-        self.assertEqual("2", by_name[MODULE.REVIEW_METRIC_FINDINGS]["asInt"])
-        self.assertEqual("1", by_name[MODULE.REVIEW_METRIC_RUNS]["asInt"])
+        self.assertEqual(1.5, by_name[MODULE.AGENT_METRIC_COST]["asDouble"])
+        self.assertEqual("2", by_name[MODULE.AGENT_METRIC_FINDINGS]["asInt"])
+        self.assertEqual("1", by_name[MODULE.AGENT_METRIC_RUNS]["asInt"])
 
 
 class LitellmTagsTest(unittest.TestCase):

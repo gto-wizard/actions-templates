@@ -495,16 +495,16 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(
             names,
             {
-                "gto.ai.review.runs",
-                "gto.ai.review.tokens",
-                "gto.ai.review.findings",
-                "gto.ai.review.duration_seconds",
+                "gto.ai.agent.runs",
+                "gto.ai.agent.tokens",
+                "gto.ai.agent.findings",
+                "gto.ai.agent.duration_seconds",
             },
         )
         kinds = {
             attribute["value"]["stringValue"]
             for m in metrics
-            if m["name"] == "gto.ai.review.tokens"
+            if m["name"] == "gto.ai.agent.tokens"
             for point in m["gauge"]["dataPoints"]
             for attribute in point["attributes"]
             if attribute["key"] == "kind"

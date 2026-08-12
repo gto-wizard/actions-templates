@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""OTLP/HTTP encoding and transport, shared by every review action in this repository.
+"""OTLP/HTTP encoding and transport, plus the schema every AI agent run in CI reports.
 
-Two actions ship PR-attributed telemetry — `claude-review` and `opencode-review` —
-and they must agree on the wire or the dashboard filtering them is comparing two things that
-only look alike. So the encoding, the transport, the resource-attribute shape, and the
-pull-request identifier live here once rather than being copied per action.
+What these actions actually do is run an LLM agent on a GitHub runner. Reviewing a pull
+request is the first TASK built on that, not the thing itself, so nothing here is named for
+it: `gto.ai.agent.*` with a `gto.ai.task` label, rather than `gto.ai.review.*`, which would
+have to be renamed the day a second task exists. The task is a dimension; the run is the
+concept.
+
+Every producer must agree on the wire or a dashboard comparing them is comparing two things
+that only look alike, so the encoding, the transport, the attribute shape and the change
+identifier live here once rather than being copied per action.
 
 Consumed by adding this directory to `sys.path`: for a `uses:` reference GitHub checks out
 the whole repository into `_actions/<owner>/<repo>/<ref>/`, so a sibling path resolves both
@@ -194,25 +199,31 @@ def span_envelope(
     }
 
 
-# --- the review schema ------------------------------------------------------------------
+# --- the agent-run schema ------------------------------------------------------------------
 #
-# One name per concept, emitted by every reviewer whatever CLI it wraps. Before this, the
+# One name per concept, emitted by every agent run whatever CLI it wraps and whatever task
+# it performs. Before this, the
 # Claude action emitted `gto.claude.pr_review.cost_usd` and the opencode action emitted
 # `gto.opencode.pr_review.findings`, which meant "a review ran" had two answers and a
 # dashboard could only count runs by unioning two metric names — and any label added to one
 # family silently failed to appear on the other. The runner is a *label*, not a name.
 
-REVIEW_METRIC_RUNS = "gto.ai.review.runs"
-REVIEW_METRIC_COST = "gto.ai.review.cost_usd"
-REVIEW_METRIC_TOKENS = "gto.ai.review.tokens"
-REVIEW_METRIC_FINDINGS = "gto.ai.review.findings"
-REVIEW_METRIC_DURATION = "gto.ai.review.duration_seconds"
+AGENT_METRIC_RUNS = "gto.ai.agent.runs"
+AGENT_METRIC_COST = "gto.ai.agent.cost_usd"
+AGENT_METRIC_TOKENS = "gto.ai.agent.tokens"
+AGENT_METRIC_FINDINGS = "gto.ai.agent.findings"
+AGENT_METRIC_DURATION = "gto.ai.agent.duration_seconds"
+# Owned here rather than by the exporter that emits it: the exporter publishes this
+# name, these actions publish the rest, and one module deciding all of them is the
+# only reason a dashboard can join them.
+AGENT_METRIC_GATEWAY_COST = "gto.ai.agent.gateway_cost_usd"
 
 
-def review_attributes(
+def agent_attributes(
     *,
     runner: str,
     model: str,
+    task: str,
     repository: str,
     change_number: object,
     status: str,
@@ -232,7 +243,7 @@ def review_attributes(
     department: str = "",
     team_id: str = "",
 ) -> dict[str, object]:
-    """The dimensions EVERY AI review carries, whichever CLI produced it.
+    """The dimensions EVERY agent run carries, whichever CLI produced it and whatever it did.
 
     This is the set a dashboard filters and groups on, so it lives in exactly one place.
     A runner with extra facts (a classification, a verdict) merges them on top of this —
@@ -242,6 +253,10 @@ def review_attributes(
     Claude run without saying so.
     """
     return {
+        # The job this agent was asked to do. A label, never part of a metric name: the
+        # runners are general LLM inference in CI and pr_review is simply the first task,
+        # so baking it into a name guarantees a rename the day a second one lands.
+        "gto.ai.task": task,
         "github.repository": repository,
         "github.run.id": run_id,
         "github.run.attempt": run_attempt,
@@ -266,7 +281,7 @@ def review_attributes(
     }
 
 
-def review_metrics(
+def agent_metrics(
     attributes: dict[str, object],
     *,
     observed_at_unix_nano: int,
@@ -287,7 +302,7 @@ def review_metrics(
     """
     metrics = [
         gauge_metric(
-            REVIEW_METRIC_RUNS,
+            AGENT_METRIC_RUNS,
             description="One completed AI pull-request review",
             unit="{run}",
             value=1,
@@ -298,7 +313,7 @@ def review_metrics(
     if cost_usd is not None:
         metrics.append(
             gauge_metric(
-                REVIEW_METRIC_COST,
+                AGENT_METRIC_COST,
                 description="Exact cost of one AI pull-request review, as reported by its runner",
                 unit="USD",
                 value=float(cost_usd),
@@ -309,7 +324,7 @@ def review_metrics(
     for kind, value in (tokens or {}).items():
         metrics.append(
             gauge_metric(
-                REVIEW_METRIC_TOKENS,
+                AGENT_METRIC_TOKENS,
                 description="Tokens billed by one AI pull-request review, by kind",
                 unit="{token}",
                 value=int(value),
@@ -323,7 +338,7 @@ def review_metrics(
         # today -- which is exactly why it is worth emitting rather than leaving in a span.
         metrics.append(
             gauge_metric(
-                REVIEW_METRIC_DURATION,
+                AGENT_METRIC_DURATION,
                 description="Wall-clock seconds of one AI pull-request review",
                 unit="s",
                 value=float(duration_seconds),
@@ -334,7 +349,7 @@ def review_metrics(
     if findings is not None:
         metrics.append(
             gauge_metric(
-                REVIEW_METRIC_FINDINGS,
+                AGENT_METRIC_FINDINGS,
                 description="Findings reported by one AI pull-request review",
                 unit="{finding}",
                 value=int(findings),
