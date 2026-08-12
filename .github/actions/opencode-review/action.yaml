@@ -122,20 +122,33 @@ runs:
         INPUT_EXTRA_INSTRUCTIONS: ${{ inputs.extra-instructions }}
       run: python3 "${{ github.action_path }}/opencode_review.py" prepare
 
+    # `opencode.ai/install` is a 307 to raw.githubusercontent.com, which rate-limits per IP —
+    # and every reviewer in a panel shares one NAT egress. Measured on the first real
+    # four-model run: two jobs had the connection reset 530ms in (curl 56) while a third spent
+    # 69s downloading successfully. Which jobs lose is arbitrary, so the fix is to stop
+    # fetching at all: the binary is cached by version, and only a cold cache touches
+    # the network. It also turns a 69-second step into about two.
+    - name: Restore the pinned opencode CLI
+      id: cli
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # pin@v4
+      with:
+        path: ${{ runner.temp }}/opencode-cli
+        key: opencode-${{ inputs.opencode-version }}-${{ runner.os }}-${{ runner.arch }}
+
     - name: Install opencode (pinned)
+      if: steps.cli.outputs.cache-hit != 'true'
       shell: bash
       env:
-        # The installer hardcodes $HOME/.opencode/bin, so an isolated HOME is also how the
-        # binary gets isolated: nothing on the runner leaks into the review, and the review
-        # leaves nothing behind. Models in a panel share a fleet but never a home.
-        HOME: ${{ steps.prepare.outputs.home-dir }}
+        # The installer hardcodes $HOME/.opencode/bin, so HOME is how the install location is
+        # chosen. Deliberately NOT the per-model review home: the binary is identical for every
+        # model, and keying a cache per model would mean four cold downloads instead of one.
+        # The review still runs under its own isolated HOME — see the run step.
+        HOME: ${{ runner.temp }}/opencode-cli
         VERSION: ${{ inputs.opencode-version }}
       run: |
         set -euo pipefail
-        # Retried, because this is a shared external dependency fetched by every reviewer in
-        # a panel at the same instant. First real multi-model run: two of four jobs died here
-        # with curl exit 56 (failure receiving network data) while their siblings installed
-        # fine. Losing a reviewer to a transient download is not a review result.
+        mkdir -p "$HOME"
+        # Retried anyway, for the cold-cache case that still races its siblings.
         for attempt in 1 2 3 4 5; do
           if curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 \
             https://opencode.ai/install | bash; then
@@ -148,7 +161,16 @@ runs:
           echo "install attempt $attempt failed; retrying in $((attempt * 5))s"
           sleep "$((attempt * 5))"
         done
-        "$HOME/.opencode/bin/opencode" --version
+
+    # Runs on a cache hit too: a restored binary that will not exec is worth finding here
+    # rather than inside the review step.
+    - name: Verify the CLI
+      shell: bash
+      env:
+        CLI_HOME: ${{ runner.temp }}/opencode-cli
+      run: |
+        set -euo pipefail
+        "$CLI_HOME/.opencode/bin/opencode" --version
 
     # `continue-on-error` does not exist for composite steps, so the exit code is captured
     # here and acted on by the last step. Everything between them is reporting, and reporting
@@ -157,7 +179,10 @@ runs:
       id: run
       shell: bash
       env:
+        # The review's own HOME — config discovery and session state — separate from where
+        # the shared binary lives.
         HOME: ${{ steps.prepare.outputs.home-dir }}
+        CLI_HOME: ${{ runner.temp }}/opencode-cli
         ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
         PROMPT_FILE: ${{ steps.prepare.outputs.prompt-file }}
         CONFIG_FILE: ${{ steps.prepare.outputs.config-file }}
@@ -174,7 +199,7 @@ runs:
         # the `exit-code` output below — after which the final step can only report "exit
         # unknown" and the report gets a fabricated 1. Observed on the first real run.
         set +e
-        export PATH="$HOME/.opencode/bin:$PATH"
+        export PATH="$CLI_HOME/.opencode/bin:$PATH"
         # opencode merges config from eight sources and a repository's own `opencode.json`
         # outranks the OPENCODE_CONFIG path. Inline content outranks the checkout, which is
         # what keeps a reviewed diff from configuring its own reviewer.
