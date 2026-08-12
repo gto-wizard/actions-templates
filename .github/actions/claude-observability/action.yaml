@@ -100,10 +100,20 @@ inputs:
     description: Optional low-cardinality + separated code areas supplied by the consumer.
     required: false
     default: repository
-  claude-version:
-    description: Pinned Claude Code version.
+  anthropic-api-key:
+    description: >-
+      Anthropic API key, forwarded to claude-code-action. Leave empty when the
+      caller supplies credentials as step `env:` instead — e.g. ANTHROPIC_AUTH_TOKEN
+      plus ANTHROPIC_BASE_URL for the LiteLLM gateway, which the action inherits.
     required: false
-    default: 2.1.228
+    default: ""
+  claude-executable:
+    description: >-
+      Absolute path to an already-installed `claude` binary. This is how a caller
+      pins a CLI version: claude-code-action installs its own runtime otherwise.
+      Point it at a cached binary to keep a warm install and a known version.
+    required: false
+    default: ""
   python-version:
     description: >-
       Python provisioned for this action's own scripts. ARC runners ship without
@@ -140,7 +150,7 @@ outputs:
     value: ${{ steps.execute.outputs.native-session-file }}
   session-id:
     description: Session id of the caller's Claude invocation.
-    value: ${{ steps.execute.outputs.session-id }}
+    value: ${{ steps.review.outputs.session_id }}
   classification-file:
     description: Path to the validated portable classification JSON.
     value: ${{ steps.execute.outputs.classification-file }}
@@ -175,6 +185,10 @@ runs:
       with:
         python-version: ${{ inputs.python-version }}
 
+    # Everything the two Claude invocations below need — PR metadata, the
+    # immutable diff, the pull request's timeline, the trace context, and the
+    # `claude_args`/`settings` values themselves — is computed once here, so the
+    # CLI contract has one owner instead of being spread across YAML expressions.
     - name: Prepare immutable PR metadata and trace context
       id: prepare
       shell: bash
@@ -194,30 +208,6 @@ runs:
         INPUT_DEPARTMENT: ${{ inputs.department }}
         INPUT_TEAM_ID: ${{ inputs.team-id }}
         INPUT_CODE_AREAS: ${{ inputs.code-areas }}
-      run: python3 "${{ github.action_path }}/claude_observability.py" prepare
-
-    - name: Install Claude Code (pinned)
-      shell: bash
-      env:
-        CLAUDE_VERSION: ${{ inputs.claude-version }}
-      run: |
-        set -euo pipefail
-        # A caller that isolates HOME (recommended) may point it at a directory
-        # the installer would otherwise have to create itself.
-        mkdir -p "$HOME"
-        export PATH="$HOME/.local/bin:$PATH"
-        if command -v claude >/dev/null 2>&1 && claude --version 2>/dev/null | grep -qE "^${CLAUDE_VERSION//./\\.}( |$)"; then
-          echo "claude $(claude --version) already present."
-        else
-          curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_VERSION"
-        fi
-        "$HOME/.local/bin/claude" --version
-
-    - name: Run Claude, classify the PR, and export the normalized summary
-      id: execute
-      shell: bash
-      env:
-        INPUT_PROMPT: ${{ inputs.prompt }}
         INPUT_MODEL: ${{ inputs.model }}
         INPUT_MAX_TURNS: ${{ inputs.max-turns }}
         INPUT_ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
@@ -228,14 +218,59 @@ runs:
         INPUT_SESSION_MODE: ${{ inputs.session-mode }}
         INPUT_SESSION_ID: ${{ inputs.session-id }}
         INPUT_CLASSIFIER_MODEL: ${{ inputs.classifier-model }}
+      run: python3 "${{ github.action_path }}/claude_observability.py" prepare
+
+    # The caller's own review. claude-code-action owns the CLI: it installs the
+    # pinned runtime, execs it with the argv we hand it via `claude_args`, and
+    # writes the message stream to its `execution_file` output. `continue-on-error`
+    # is what lets the reporting steps below run after a failed review — the
+    # action's exit code is restored at the end, from this step's conclusion.
+    - name: Run the caller's Claude invocation
+      id: review
+      continue-on-error: true
+      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # pin@v1.0.191
+      with:
+        prompt: ${{ inputs.prompt }}
+        claude_args: ${{ steps.prepare.outputs.review-claude-args }}
+        settings: ${{ steps.prepare.outputs.claude-settings }}
+        anthropic_api_key: ${{ inputs.anthropic-api-key }}
+        path_to_claude_code_executable: ${{ inputs.claude-executable }}
+        github_token: ${{ inputs.github-token }}
+
+    # The portable classification pass: read-only, schema-constrained, over the
+    # immutable diff plus the PR timeline. Separate from the review on purpose —
+    # every repository gets the same labels regardless of what its reviewer says.
+    - name: Classify the pull request
+      id: classify
+      if: always()
+      continue-on-error: true
+      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # pin@v1.0.191
+      with:
+        prompt: ${{ steps.prepare.outputs.classifier-prompt }}
+        claude_args: ${{ steps.prepare.outputs.classifier-claude-args }}
+        settings: ${{ steps.prepare.outputs.classifier-settings }}
+        anthropic_api_key: ${{ inputs.anthropic-api-key }}
+        path_to_claude_code_executable: ${{ inputs.claude-executable }}
+        github_token: ${{ inputs.github-token }}
+
+    - name: Reconcile cost, classification, and evidence
+      id: execute
+      if: always()
+      shell: bash
+      env:
         GTO_CLAUDE_ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
         GTO_CLAUDE_METADATA_FILE: ${{ steps.prepare.outputs.metadata-file }}
-        GTO_CLAUDE_RESOURCE_ATTRIBUTES: ${{ steps.prepare.outputs.resource-attributes }}
-        GTO_CLAUDE_TRACEPARENT: ${{ steps.prepare.outputs.traceparent }}
+        GTO_CLAUDE_REVIEW_EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+        GTO_CLAUDE_REVIEW_SESSION_ID: ${{ steps.review.outputs.session_id }}
+        GTO_CLAUDE_REVIEW_CONCLUSION: ${{ steps.review.outcome }}
+        GTO_CLAUDE_CLASSIFIER_EXECUTION_FILE: ${{ steps.classify.outputs.execution_file }}
+        GTO_CLAUDE_CLASSIFIER_STRUCTURED_OUTPUT: ${{ steps.classify.outputs.structured_output }}
+        GTO_CLAUDE_CLASSIFIER_CONCLUSION: ${{ steps.classify.outcome }}
+        INPUT_CLASSIFIER_MODEL: ${{ inputs.classifier-model }}
         OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${{ inputs.metrics-endpoint }}
         OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ inputs.traces-endpoint }}
         OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
-      run: python3 "${{ github.action_path }}/claude_observability.py" run
+      run: python3 "${{ github.action_path }}/claude_observability.py" report
 
     - name: Upload private Claude execution evidence
       if: always()
@@ -246,3 +281,19 @@ runs:
         path: ${{ steps.prepare.outputs.artifact-dir }}
         retention-days: ${{ inputs.artifact-retention-days }}
         if-no-files-found: warn
+
+    # Restore the caller's verdict. Everything above this line is reporting and
+    # runs `if: always()`; this is the only step that decides the action's exit
+    # code, and it reads exactly one thing — whether the review itself passed.
+    - name: Preserve the review's outcome
+      if: always()
+      shell: bash
+      env:
+        REVIEW_OUTCOME: ${{ steps.review.outcome }}
+      run: |
+        set -euo pipefail
+        if [ "$REVIEW_OUTCOME" != "success" ]; then
+          echo "::error title=Claude review failed::the wrapped invocation ended with '$REVIEW_OUTCOME'; telemetry and evidence were still collected."
+          exit 1
+        fi
+        echo "Wrapped Claude invocation succeeded."

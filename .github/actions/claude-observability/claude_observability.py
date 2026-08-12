@@ -411,74 +411,51 @@ def prepare() -> int:
     append_output("metadata-file", str(metadata_file))
     append_output("resource-attributes", resource_attributes)
     append_output("traceparent", metadata["trace"]["traceparent"])
+
+    # Everything the two claude-code-action invocations need, computed once here
+    # so the composite steps stay declarative and the CLI contract has a single
+    # owner instead of being spread across YAML expressions.
+    traceparent = metadata["trace"]["traceparent"]
+    append_multiline_output("claude-settings", claude_settings(resource_attributes, traceparent))
+    append_multiline_output(
+        "classifier-settings", claude_settings(resource_attributes, traceparent, role="classifier")
+    )
+    append_multiline_output("review-claude-args", review_claude_args())
+    append_multiline_output("classifier-claude-args", classifier_claude_args(artifact_dir))
+    append_multiline_output(
+        "classifier-prompt",
+        classifier_prompt(
+            metadata_file,
+            classifier_diff_file,
+            Path(timeline["render"]) if timeline.get("render") else None,
+        ),
+    )
     return 0
 
 
-def bool_input(name: str) -> bool:
-    value = env(name, "false").lower()
-    if value not in {"true", "false"}:
-        raise ValueError(f"{name} must be true or false")
-    return value == "true"
-
-
-def claude_binary() -> str:
-    found = shutil.which("claude")
-    if found:
-        return found
-    candidate = Path.home() / ".local" / "bin" / "claude"
-    if candidate.is_file():
-        return str(candidate)
-    raise RuntimeError("claude CLI not found")
-
-
-def render_event(event: dict[str, Any], *, prefix: str) -> None:
-    event_type = event.get("type")
-    if event_type == "system" and event.get("subtype") == "init":
-        print(f"[{prefix}:init] session {event.get('session_id')} model {event.get('model', '?')}", flush=True)
-    elif event_type == "assistant":
-        message = event.get("message") or {}
-        for content in message.get("content") or []:
-            if content.get("type") == "tool_use":
-                print(f"[{prefix}:tool] {content.get('name')}", flush=True)
-            elif content.get("type") == "text" and str(content.get("text") or "").strip():
-                print(f"[{prefix}] {str(content['text'])[:400]}", flush=True)
-    elif event_type == "result":
-        print(
-            f"[{prefix}:result] {event.get('subtype')} · cost=${event.get('total_cost_usd')} · "
-            f"turns={event.get('num_turns')}",
-            flush=True,
-        )
-
-
-def stream_command(argv: list[str], output: Path, *, prefix: str, extra_env: dict[str, str]) -> int:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8") as evidence:
-        process = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env={**os.environ, **extra_env},
-        )
-        assert process.stdout is not None
-        for line in process.stdout:
-            evidence.write(line)
-            evidence.flush()
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                render_event(value, prefix=prefix)
-        return process.wait()
-
-
 def read_events(path: Path) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
+    """Read Claude's message stream, whichever shape it arrives in.
+
+    claude-code-action writes its `execution_file` as a pretty-printed JSON
+    *array* (`JSON.stringify(messages, null, 2)`), while a raw
+    `--output-format stream-json` capture is JSONL. A line-by-line reader finds
+    nothing in the array form and reports a zero-cost, unclassified run rather
+    than failing — so both shapes are handled here, at the one place that reads
+    the file.
+    """
     if not path.is_file():
-        return events
-    for line in path.read_text(encoding="utf-8").splitlines():
+        return []
+    raw = path.read_text(encoding="utf-8").strip()
+    if not raw:
+        return []
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return [event for event in parsed if isinstance(event, dict)] if isinstance(parsed, list) else []
+    events: list[dict[str, Any]] = []
+    for line in raw.splitlines():
         try:
             value = json.loads(line)
         except json.JSONDecodeError:
@@ -606,7 +583,17 @@ Return exactly one risk based on how many things can break and the consequence i
 Risk is max-by-dimension, not an average: one risky dimension makes the PR risky. A one-line payment or authentication change is still risky. Complexity and risk must be judged separately: a hard internal refactor can be safe, and a light code change can be risky. Keep every rationale concise and evidence-based."""
 
 
-def base_otel_env(metadata: dict[str, Any]) -> dict[str, str]:
+def base_otel_env(resource_attributes: str, traceparent: str, *, role: str = "") -> dict[str, str]:
+    """Claude's native OTel environment, as a `settings.env` block for the action.
+
+    claude-code-action forwards `settings` to the CLI, so this is how the beta
+    trace and per-signal exporter variables reach the process. They used to be
+    passed as step `env:` when we exec'd the CLI ourselves; routing them through
+    `settings` keeps them attached to the invocation rather than the job.
+    """
+    attributes = resource_attributes
+    if role:
+        attributes = f"{attributes},gto.agent.role={role}" if attributes else f"gto.agent.role={role}"
     return {
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
         "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
@@ -629,27 +616,28 @@ def base_otel_env(metadata: dict[str, Any]) -> dict[str, str]:
         "OTEL_LOG_TOOL_DETAILS": "0",
         "OTEL_LOG_TOOL_CONTENT": "0",
         "OTEL_LOG_RAW_API_BODIES": "0",
-        "OTEL_RESOURCE_ATTRIBUTES": env("GTO_CLAUDE_RESOURCE_ATTRIBUTES"),
-        "TRACEPARENT": metadata["trace"]["traceparent"],
+        "OTEL_RESOURCE_ATTRIBUTES": attributes,
+        "TRACEPARENT": traceparent,
     }
 
 
-def main_argv(binary: str) -> list[str]:
+def claude_settings(resource_attributes: str, traceparent: str, *, role: str = "") -> str:
+    """The `settings` input value for one claude-code-action invocation."""
+    return json.dumps({"env": base_otel_env(resource_attributes, traceparent, role=role)}, separators=(",", ":"))
+
+
+def review_claude_args() -> str:
+    """`claude_args` for the caller's own invocation, one flag per line.
+
+    The caller's review policy in CLI form. `--output-format`/`--verbose` are
+    deliberately absent: claude-code-action owns the stream and writes its own
+    `execution_file`, and passing them would fight it for stdout.
+    """
+    lines = [f"--model {env('INPUT_MODEL', 'sonnet')}"]
     max_turns = env("INPUT_MAX_TURNS", "60")
     if not max_turns.isdigit() or int(max_turns) < 1:
         raise ValueError("max-turns must be a positive integer")
-    argv = [
-        binary,
-        "-p",
-        env("INPUT_PROMPT"),
-        "--model",
-        env("INPUT_MODEL", "sonnet"),
-        "--max-turns",
-        max_turns,
-        "--output-format",
-        "stream-json",
-        "--verbose",
-    ]
+    lines.append(f"--max-turns {max_turns}")
     for input_name, flag in (
         ("INPUT_ALLOWED_TOOLS", "--allowedTools"),
         ("INPUT_DISALLOWED_TOOLS", "--disallowedTools"),
@@ -657,11 +645,16 @@ def main_argv(binary: str) -> list[str]:
     ):
         value = env(input_name)
         if value:
-            argv.extend([flag, value])
-    if bool_input("INPUT_STRICT_MCP_CONFIG"):
-        argv.append("--strict-mcp-config")
-    if bool_input("INPUT_DISABLE_SLASH_COMMANDS"):
-        argv.append("--disable-slash-commands")
+            lines.append(f"{flag} {value}")
+    for input_name, flag in (
+        ("INPUT_STRICT_MCP_CONFIG", "--strict-mcp-config"),
+        ("INPUT_DISABLE_SLASH_COMMANDS", "--disable-slash-commands"),
+    ):
+        value = env(input_name, "false").lower()
+        if value not in {"true", "false"}:
+            raise ValueError(f"{input_name} must be true or false")
+        if value == "true":
+            lines.append(flag)
     mode = env("INPUT_SESSION_MODE", "fresh")
     session_id = env("INPUT_SESSION_ID")
     if mode not in {"fresh", "create", "resume"}:
@@ -669,39 +662,40 @@ def main_argv(binary: str) -> list[str]:
     if mode != "fresh":
         if not SESSION_ID_PATTERN.fullmatch(session_id):
             raise ValueError("create/resume session-mode requires a UUID session-id")
-        argv.extend(["--session-id" if mode == "create" else "--resume", session_id])
-    return argv
+        lines.append(f"{'--session-id' if mode == 'create' else '--resume'} {session_id}")
+    return "\n".join(lines)
 
 
-def classifier_argv(
-    binary: str, metadata_file: Path, diff_file: Path, timeline_file: Path | None = None
-) -> list[str]:
-    return [
-        binary,
-        "-p",
-        classifier_prompt(metadata_file, diff_file, timeline_file),
-        "--model",
-        env("INPUT_CLASSIFIER_MODEL", "haiku"),
-        "--max-turns",
-        "8",
-        # Metadata and diff live in RUNNER_TEMP, outside the checkout. Without
-        # this the classifier is allowed to Read and still cannot see its input.
-        "--add-dir",
-        str(metadata_file.parent),
-        "--allowedTools",
-        "Read",
-        "--disallowedTools",
-        "Write,Edit,NotebookEdit,Bash,WebFetch,WebSearch,Agent",
-        "--setting-sources",
-        "user",
+def classifier_claude_args(artifact_dir: Path) -> str:
+    """`claude_args` for the classification pass.
+
+    Read-only and schema-constrained. `--add-dir` is what makes the metadata and
+    diff readable at all: they live in RUNNER_TEMP, outside the checkout, so the
+    Read tool would otherwise refuse them.
+    """
+    return "\n".join([
+        f"--model {env('INPUT_CLASSIFIER_MODEL', 'haiku')}",
+        "--max-turns 8",
+        f"--add-dir {artifact_dir}",
+        "--allowedTools Read",
+        "--disallowedTools Write,Edit,NotebookEdit,Bash,WebFetch,WebSearch,Agent",
+        "--setting-sources user",
         "--strict-mcp-config",
         "--disable-slash-commands",
-        "--json-schema",
-        json.dumps(CLASSIFICATION_SCHEMA, separators=(",", ":")),
-        "--output-format",
-        "stream-json",
-        "--verbose",
-    ]
+        f"--json-schema {json.dumps(CLASSIFICATION_SCHEMA, separators=(',', ':'))}",
+    ])
+
+
+def append_multiline_output(name: str, value: str) -> None:
+    """Write a multi-line step output using a heredoc delimiter."""
+    output = os.environ.get("GITHUB_OUTPUT")
+    if not output:
+        return
+    delimiter = f"__GTO_{name.upper().replace('-', '_')}_{secrets.token_hex(8)}__"
+    if delimiter in value:
+        raise ValueError("generated output delimiter collided with the value")
+    with Path(output).open("a", encoding="utf-8") as stream:
+        stream.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
 
 
 def numeric_cost(result: dict[str, Any]) -> float:
@@ -875,6 +869,132 @@ def build_summary_payloads(
     return {"metrics": metrics, "logs": logs, "traces": traces}
 
 
+def report() -> int:
+    """Reconcile what the two claude-code-action invocations produced.
+
+    Runs with `if: always()`, after the review. It reads, it never executes — so
+    it cannot decide whether the review passed. The action's exit code comes from
+    the review step's own outcome; this function's return value only says whether
+    reporting itself worked, and even then it degrades rather than fails.
+    """
+    artifact_dir = Path(env("GTO_CLAUDE_ARTIFACT_DIR"))
+    metadata_file = Path(env("GTO_CLAUDE_METADATA_FILE"))
+    metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+
+    # claude-code-action writes its execution file into RUNNER_TEMP under a fixed
+    # name, so the second invocation overwrites the first. Copy each into the
+    # evidence directory as it is consumed rather than referencing them in place.
+    review_events: list[dict[str, Any]] = []
+    review_file = artifact_dir / "claude-execution.json"
+    source = env("GTO_CLAUDE_REVIEW_EXECUTION_FILE")
+    if source and Path(source).is_file():
+        shutil.copyfile(source, review_file)
+        review_events = read_events(review_file)
+    else:
+        print("::warning title=Claude execution log missing::the review produced no execution file", flush=True)
+    review_result = result_event(review_events)
+
+    review_session = copy_native_session(
+        Path(env("HOME", str(Path.home()))),
+        env("GTO_CLAUDE_REVIEW_SESSION_ID") or review_result.get("session_id"),
+        artifact_dir / "claude-session.jsonl",
+    )
+
+    classifier_events: list[dict[str, Any]] = []
+    classifier_file = artifact_dir / "claude-classification.json"
+    classifier_source = env("GTO_CLAUDE_CLASSIFIER_EXECUTION_FILE")
+    if classifier_source and Path(classifier_source).is_file():
+        shutil.copyfile(classifier_source, classifier_file)
+        classifier_events = read_events(classifier_file)
+    classifier_result = result_event(classifier_events)
+
+    # `structured_output` is the action's own parse of a `--json-schema` run and
+    # is preferred; the execution log is the fallback when the step was skipped
+    # or the output did not survive. Either way it is re-validated here — the
+    # action guarantees the shape it was given, not that the model obeyed us.
+    raw_classification = (
+        parsed_object(env("GTO_CLAUDE_CLASSIFIER_STRUCTURED_OUTPUT"))
+        or parsed_object(classifier_result.get("structured_output"))
+        or parsed_object(classifier_result.get("result"))
+    )
+    classification = validate_classification(raw_classification)
+    if classification is None:
+        conclusion = env("GTO_CLAUDE_CLASSIFIER_CONCLUSION") or "unknown"
+        reason = f"portable classifier produced no valid classification (conclusion: {conclusion})"
+        classification = fallback_classification(reason)
+        classification_status = "failed"
+        print(f"::warning title=PR classification unavailable::{reason}", flush=True)
+    else:
+        classification_status = "success"
+    (artifact_dir / "classification.json").write_text(
+        json.dumps(classification, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    review_conclusion = env("GTO_CLAUDE_REVIEW_CONCLUSION")
+    is_error = bool(review_result.get("is_error")) or review_conclusion not in ("", "success")
+    timeline = metadata.get("timeline") or {}
+    run_report = {
+        "schema_version": SCHEMA_VERSION,
+        "source": "claude-code-action",
+        "metadata": metadata,
+        "main": {
+            "conclusion": review_conclusion or "unknown",
+            "status": review_result.get("subtype") or review_conclusion or "unknown",
+            "is_error": is_error,
+            "session_id": env("GTO_CLAUDE_REVIEW_SESSION_ID") or review_result.get("session_id"),
+            "cost_usd": numeric_cost(review_result),
+            "turns": review_result.get("num_turns"),
+        },
+        "classifier": {
+            "conclusion": env("GTO_CLAUDE_CLASSIFIER_CONCLUSION") or "unknown",
+            "cost_usd": numeric_cost(classifier_result),
+            "model": env("INPUT_CLASSIFIER_MODEL", "haiku"),
+            "session_id": classifier_result.get("session_id"),
+        },
+        "classification_status": classification_status,
+        "classification": classification,
+        "model_usage": merged_usage(model_usage(review_result), model_usage(classifier_result)),
+        "total_cost_usd": numeric_cost(review_result) + numeric_cost(classifier_result),
+        "timeline": timeline,
+        "artifacts": {
+            "main_json": str(review_file) if review_events else "",
+            "main_native_session_jsonl": str(review_session or ""),
+            "classifier_json": str(classifier_file) if classifier_events else "",
+            "diff": str(metadata["diff_file"]),
+            "timeline_json": str(timeline.get("file") or ""),
+        },
+    }
+    (artifact_dir / "claude-run-report.json").write_text(
+        json.dumps(run_report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    append_output("change-type", classification["change_type"])
+    append_output("complexity", classification["complexity"])
+    append_output("risk", classification["risk"])
+    append_output("classification-status", classification_status)
+    append_output("total-cost-usd", f"{run_report['total_cost_usd']:.6f}")
+    append_output("native-session-file", str(review_session or ""))
+    # The copied paths, not claude-code-action's own: it writes to a fixed name in
+    # RUNNER_TEMP, so the classifier run overwrites the review's file. Consumers
+    # that parse the transcript (a rescue step, a budget gate) need the durable copy.
+    append_output("execution-file", str(review_file) if review_events else "")
+    append_output("classification-file", str(artifact_dir / "classification.json"))
+    append_output("report-file", str(artifact_dir / "claude-run-report.json"))
+
+    try:
+        export_summary(metadata, run_report)
+    except Exception as error:  # telemetry must not alter the caller's review outcome
+        print(f"::warning title=Claude OTel summary export failed::{error}", flush=True)
+
+    print(
+        f"classification change_type={classification['change_type']} "
+        f"complexity={classification['complexity']} risk={classification['risk']} "
+        f"total_cost_usd={run_report['total_cost_usd']:.6f}",
+        flush=True,
+    )
+    return 0
+
+
 def export_summary(metadata: dict[str, Any], report: dict[str, Any]) -> None:
     payloads = build_summary_payloads(metadata, report, observed_at_unix_nano=time.time_ns())
     post_json(env("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"), payloads["metrics"])
@@ -882,158 +1002,15 @@ def export_summary(metadata: dict[str, Any], report: dict[str, Any]) -> None:
     post_json(env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"), payloads["traces"])
 
 
-def classify_and_report(
-    *,
-    artifact_dir: Path,
-    metadata: dict[str, Any],
-    metadata_file: Path,
-    main_file: Path,
-    main_rc: int,
-    binary: str,
-    otel_env: dict[str, str],
-) -> None:
-    """Everything after the caller's Claude call. Never changes the caller's exit code."""
-    classifier_file = artifact_dir / "claude-classification.jsonl"
-    classification_file = artifact_dir / "classification.json"
-    report_file = artifact_dir / "claude-run-report.json"
-    classifier_diff = Path(metadata.get("classifier_diff_file") or metadata["diff_file"])
-
-    main_result = result_event(read_events(main_file))
-    main_session = copy_native_session(
-        Path(env("HOME", str(Path.home()))),
-        main_result.get("session_id"),
-        artifact_dir / "claude-session.jsonl",
-    )
-    append_output("session-id", str(main_result.get("session_id") or ""))
-    append_output("native-session-file", str(main_session or ""))
-
-    classifier_home = Path(metadata["classifier_home"])
-    classifier_home.mkdir(parents=True, exist_ok=True)
-    classifier_env = {
-        **otel_env,
-        "HOME": str(classifier_home),
-        "OTEL_RESOURCE_ATTRIBUTES": f"{otel_env['OTEL_RESOURCE_ATTRIBUTES']},gto.agent.role=classifier",
-    }
-    timeline = metadata.get("timeline") or {}
-    timeline_render = Path(timeline["render"]) if timeline.get("render") else None
-    classifier_rc = stream_command(
-        classifier_argv(binary, metadata_file, classifier_diff, timeline_render),
-        classifier_file,
-        prefix="classifier",
-        extra_env=classifier_env,
-    )
-    classifier_result = result_event(read_events(classifier_file))
-    copy_native_session(
-        classifier_home,
-        classifier_result.get("session_id"),
-        artifact_dir / "claude-classifier-session.jsonl",
-    )
-
-    raw_classification = parsed_object(classifier_result.get("structured_output")) or parsed_object(
-        classifier_result.get("result")
-    )
-    classification = validate_classification(raw_classification)
-    if classification is None:
-        reason = f"portable classifier failed validation (exit {classifier_rc})"
-        classification = fallback_classification(reason)
-        classification_status = "failed"
-        print(f"::warning title=PR classification unavailable::{reason}", flush=True)
-    else:
-        classification_status = "success"
-    classification_file.write_text(json.dumps(classification, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    report = {
-        "schema_version": SCHEMA_VERSION,
-        "source": "claude-code",
-        "metadata": metadata,
-        "main": {
-            "exit_code": main_rc,
-            "status": main_result.get("subtype") or ("error" if main_rc else "unknown"),
-            "is_error": bool(main_result.get("is_error")) or main_rc != 0,
-            "session_id": main_result.get("session_id"),
-            "cost_usd": numeric_cost(main_result),
-            "turns": main_result.get("num_turns"),
-        },
-        "classifier": {
-            "exit_code": classifier_rc,
-            "cost_usd": numeric_cost(classifier_result),
-            "model": env("INPUT_CLASSIFIER_MODEL", "haiku"),
-            "session_id": classifier_result.get("session_id"),
-        },
-        "classification_status": classification_status,
-        "classification": classification,
-        "model_usage": merged_usage(model_usage(main_result), model_usage(classifier_result)),
-        "total_cost_usd": numeric_cost(main_result) + numeric_cost(classifier_result),
-        "timeline": timeline,
-        "artifacts": {
-            "main_jsonl": str(main_file),
-            "main_native_session_jsonl": str(main_session or ""),
-            "classifier_jsonl": str(classifier_file),
-            "diff": str(metadata["diff_file"]),
-            "timeline_json": str(timeline.get("file") or ""),
-        },
-    }
-    report_file.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    append_output("complexity", classification["complexity"])
-    append_output("risk", classification["risk"])
-    append_output("change-type", classification["change_type"])
-    append_output("classification-status", classification_status)
-    append_output("total-cost-usd", f"{report['total_cost_usd']:.6f}")
-
-    try:
-        export_summary(metadata, report)
-    except Exception as error:  # telemetry must not alter the caller's review outcome
-        print(f"::warning title=Claude OTel summary export failed::{error}", flush=True)
-
-    print(
-        f"classification change_type={classification['change_type']} "
-        f"complexity={classification['complexity']} risk={classification['risk']} "
-        f"total_cost_usd={report['total_cost_usd']:.6f}",
-        flush=True,
-    )
-
-
-def run() -> int:
-    artifact_dir = Path(env("GTO_CLAUDE_ARTIFACT_DIR"))
-    metadata_file = Path(env("GTO_CLAUDE_METADATA_FILE"))
-    metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
-    main_file = artifact_dir / "claude-execution.jsonl"
-    append_output("execution-file", str(main_file))
-    append_output("classification-file", str(artifact_dir / "classification.json"))
-    append_output("report-file", str(artifact_dir / "claude-run-report.json"))
-
-    binary = claude_binary()
-    otel_env = base_otel_env(metadata)
-    print("Starting wrapped Claude invocation; complete streams remain in the private artifact.", flush=True)
-    main_rc = stream_command(main_argv(binary), main_file, prefix="claude", extra_env=otel_env)
-
-    # From here on the review verdict is already decided. Classification,
-    # evidence, and telemetry are reporting: they warn and never override it.
-    try:
-        classify_and_report(
-            artifact_dir=artifact_dir,
-            metadata=metadata,
-            metadata_file=metadata_file,
-            main_file=main_file,
-            main_rc=main_rc,
-            binary=binary,
-            otel_env=otel_env,
-        )
-    except Exception as error:
-        print(f"::warning title=Claude observability post-processing failed::{error}", flush=True)
-
-    return main_rc
-
-
 def main() -> int:
     try:
         command = sys.argv[1]
         if command == "prepare":
             return prepare()
-        if command == "run":
-            return run()
-        raise ValueError("usage: claude_observability.py <prepare|run>")
-    except (KeyError, IndexError, ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
+        if command == "report":
+            return report()
+        raise ValueError("usage: claude_observability.py <prepare|report>")
+    except (KeyError, IndexError, ValueError, RuntimeError, OSError) as error:
         print(f"claude-observability: {error}", file=sys.stderr)
         return 2
 

@@ -67,17 +67,26 @@ Installs Cloudflare WARP and connects it in **proxy mode** so subsequent steps c
 Wraps **one** existing Claude Code invocation without owning its review prompt,
 tools, model, verdict, or retry strategy. Those stay with the calling repository.
 The action owns only the execution wire, so five repositories can answer "what
-did we spend, on what, and why" without five implementations of it:
+did we spend, on what, and why" without five implementations of it.
 
-- installs and verifies the pinned Claude Code runtime;
+The invocation itself runs on **`anthropics/claude-code-action@v1`** — this action
+does not exec the CLI. It hands the official action `claude_args` and `settings`,
+then consumes its `execution_file`, `structured_output`, `session_id`, and
+`conclusion` outputs. What it adds around that:
+
+- the pinned runtime, when you point `claude-executable` at a cached binary;
 - exports native Claude OTel under one PR-scoped trace;
-- captures both the streamed `stream-json` transcript and Claude's own session JSONL;
+- captures both the action's `execution_file` message log and Claude's own session
+  JSONL, copied into the evidence directory (the action writes to a fixed name in
+  `RUNNER_TEMP`, so the classifier pass would otherwise overwrite the review's);
 - captures the pull request's timeline — commits, comments, review comments,
   reviews, labels, force pushes, participants;
 - runs a portable structured classifier over the immutable diff plus that timeline;
 - emits one exact-cost metric, log record, and root span;
 - uploads private evidence for 14 days;
-- **returns Claude's original exit code, always.**
+- **returns Claude's original exit code, always** — the wrapped step runs with
+  `continue-on-error`, every reporting step runs `if: always()`, and one final step
+  re-fails on the review's own outcome.
 
 That last line is the contract that matters. Classification and telemetry are
 reporting; a failed classifier or an unreachable collector warns and never
@@ -126,6 +135,10 @@ classified as `safe`.
     team-id: <litellm-team-id>
 ```
 
+Pass credentials either as `anthropic-api-key`, or as step `env:` that the
+official action inherits — `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` for the
+LiteLLM gateway.
+
 `model` and `classifier-model` default to the Anthropic-direct aliases `sonnet`
 and `haiku`. Callers routing through the LiteLLM gateway must pass the names that
 gateway exposes (`claude-sonnet-5`, `claude-haiku-4.5`, `claude-opus-5`) — the
@@ -140,7 +153,8 @@ Caller requirements:
 - A runner able to reach the OTLP endpoints. The defaults are in-cluster service
   DNS, so an ARC runner in the CI cluster needs no collector credential.
 - Nothing for Python — the action provisions its own unless you pass
-  `python-version: ""`.
+  `python-version: ""`. Nothing for the CLI either: `claude-code-action` installs
+  it. Pass `claude-executable` only to pin a version or reuse a cached binary.
 
 Retries and multi-pass reviews stay the caller's business: give each Claude call
 its own `invocation` name (`primary`, `retry-1`) and the telemetry separates
