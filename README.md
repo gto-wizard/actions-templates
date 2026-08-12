@@ -260,6 +260,7 @@ metric names, built by `shared/gto_otlp.py`. The runner is a label, never part o
 | `gto_ai_review_cost_usd` | the runner knows its price | Claude today. Absent, never zero — a zero reads as free. |
 | `gto_ai_review_tokens` | the runner reports tokens | `kind` = input/output/reasoning/cache_read. |
 | `gto_ai_review_findings` | the runner reports findings | opencode today. |
+| `gto_ai_review_duration_seconds` | always | wall clock. EVERY runner reports it, so it is the one axis on which all reviewers compare directly today. |
 
 Plus a `gto.opencode.pr_review.completed` event to Loki and a `gto.opencode.pr_review`
 root span to Tempo. The shared dimensions come from `review_attributes()` so they cannot

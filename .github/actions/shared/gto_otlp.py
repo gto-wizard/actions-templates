@@ -206,6 +206,7 @@ REVIEW_METRIC_RUNS = "gto.ai.review.runs"
 REVIEW_METRIC_COST = "gto.ai.review.cost_usd"
 REVIEW_METRIC_TOKENS = "gto.ai.review.tokens"
 REVIEW_METRIC_FINDINGS = "gto.ai.review.findings"
+REVIEW_METRIC_DURATION = "gto.ai.review.duration_seconds"
 
 
 def review_attributes(
@@ -272,6 +273,7 @@ def review_metrics(
     cost_usd: float | None = None,
     tokens: dict[str, int] | None = None,
     findings: int | None = None,
+    duration_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     """Every gauge one completed review contributes.
 
@@ -312,6 +314,20 @@ def review_metrics(
                 unit="{token}",
                 value=int(value),
                 attributes={**attributes, "kind": kind},
+                observed_at_unix_nano=observed_at_unix_nano,
+            )
+        )
+    if duration_seconds is not None:
+        # Wall clock for the whole wrapped review. Unlike cost, EVERY runner can report this,
+        # so it is the one economic axis on which all five reviewers are directly comparable
+        # today -- which is exactly why it is worth emitting rather than leaving in a span.
+        metrics.append(
+            gauge_metric(
+                REVIEW_METRIC_DURATION,
+                description="Wall-clock seconds of one AI pull-request review",
+                unit="s",
+                value=float(duration_seconds),
+                attributes=attributes,
                 observed_at_unix_nano=observed_at_unix_nano,
             )
         )

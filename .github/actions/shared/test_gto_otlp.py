@@ -93,6 +93,18 @@ class ReviewMetricsTest(unittest.TestCase):
         )
         self.assertEqual(MODULE.REVIEW_METRIC_RUNS, claude[0])
 
+    def test_duration_is_reported_by_every_runner(self) -> None:
+        # The one economic axis on which all five reviewers are comparable today, since
+        # only Claude can report a price.
+        for kwargs in ({"cost_usd": 1.0}, {"tokens": {"input": 1}, "findings": 0}):
+            with self.subTest(**kwargs):
+                self.assertIn(MODULE.REVIEW_METRIC_DURATION, self._names(duration_seconds=42.5, **kwargs))
+
+    def test_duration_is_a_double_so_sub_second_runs_are_not_floored(self) -> None:
+        metrics = MODULE.review_metrics(attributes(), observed_at_unix_nano=1, duration_seconds=0.75)
+        point = next(m for m in metrics if m["name"] == MODULE.REVIEW_METRIC_DURATION)
+        self.assertEqual(0.75, point["gauge"]["dataPoints"][0]["asDouble"])
+
     def test_token_kind_rides_as_a_label_not_a_metric_name(self) -> None:
         metrics = MODULE.review_metrics(
             attributes(),
