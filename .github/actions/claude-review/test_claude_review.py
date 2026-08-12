@@ -498,7 +498,7 @@ class SummaryPayloadTest(unittest.TestCase):
         payloads = MODULE.build_summary_payloads(metadata, report, observed_at_unix_nano=2_000_000_000)
         emitted = payloads["metrics"]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
         by_name = {m["name"]: m for m in emitted}
-        metric = by_name["gto.ai.review.cost_usd"]
+        metric = by_name["gto.ai.agent.cost_usd"]
         labels = {
             item["key"]: next(iter(item["value"].values()))
             for item in metric["gauge"]["dataPoints"][0]["attributes"]
@@ -507,7 +507,7 @@ class SummaryPayloadTest(unittest.TestCase):
         # Runner-neutral names shared with the opencode action, and a `runs` series that
         # exists whether or not the runner could price itself.
         self.assertEqual(
-            {"gto.ai.review.runs", "gto.ai.review.cost_usd", "gto.ai.review.duration_seconds"},
+            {"gto.ai.agent.runs", "gto.ai.agent.cost_usd", "gto.ai.agent.duration_seconds"},
             set(by_name),
         )
         self.assertEqual("claude", labels["gto.review.runner"])

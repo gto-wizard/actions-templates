@@ -251,16 +251,18 @@ Evidence artifact (14 days): `pr-metadata.json`, `pr.diff.patch`,
 Outputs: `verdict`, `findings`, `status`, `session-id`, `tokens-input`,
 `tokens-output`, `report-file`, `artifact-name`.
 
-**Telemetry.** Every reviewer — this one and `claude-review` — emits the *same*
-metric names, built by `shared/gto_otlp.py`. The runner is a label, never part of a name:
+**Telemetry.** What these actions do is run an LLM agent on a runner; reviewing a pull
+request is the first *task* built on that. So the metrics are named for the run, not the
+task, and both the runner and the task are labels — `gto.ai.task="pr_review"`,
+`gto.review.runner="opencode"`. Built by `shared/gto_otlp.py`:
 
 | metric | emitted when | notes |
 | --- | --- | --- |
-| `gto_ai_review_runs` | always | the series to count. A review that could report nothing else still ran. |
-| `gto_ai_review_cost_usd` | the runner knows its price | Claude today. Absent, never zero — a zero reads as free. |
-| `gto_ai_review_tokens` | the runner reports tokens | `kind` = input/output/reasoning/cache_read. |
-| `gto_ai_review_findings` | the runner reports findings | opencode today. |
-| `gto_ai_review_duration_seconds` | always | wall clock. EVERY runner reports it, so it is the one axis on which all reviewers compare directly today. |
+| `gto_ai_agent_runs` | always | the series to count. A run that could report nothing else still ran. |
+| `gto_ai_agent_cost_usd` | the runner knows its price | Claude today. Absent, never zero — a zero reads as free. |
+| `gto_ai_agent_tokens` | the runner reports tokens | `kind` = input/output/reasoning/cache_read. |
+| `gto_ai_agent_findings` | the runner reports findings | opencode today. |
+| `gto_ai_agent_duration_seconds` | always | wall clock. EVERY runner reports it, so it is the one axis on which all reviewers compare directly today. |
 
 Plus a `gto.opencode.pr_review.completed` event to Loki and a `gto.opencode.pr_review`
 root span to Tempo. The shared dimensions come from `review_attributes()` so they cannot
@@ -271,7 +273,7 @@ opencode still has no cost of its own: it reports `cost: 0` for a custom provide
 its token counts are per-message rather than per-session, so deriving dollars from them
 reconciles ~4x low. Instead every request carries
 `x-litellm-tags: gto-ai-review,runner:…,model:…,run:<github run id>`, so the gateway's
-own spend log can be split per review and joined back to `gto_ai_review_runs` on
+own spend log can be split per review and joined back to `gto_ai_agent_runs` on
 `github_run_id`. Filter on `vcs.change.ref` (`gto-brain#182`), never the bare number,
 which collides across repositories. Any endpoint set to an empty string skips that
 signal, and an unreachable collector warns without changing the review's verdict.
@@ -283,3 +285,36 @@ before it writes one — so it is passed in separately. That matters because
 `concurrency: cancel-in-progress` means every re-push cancels the previous panel, and
 without the distinction each push would manufacture a fake "this model cannot answer"
 data point.
+
+### `gateway-spend-export`
+
+What the LLM gateway **actually billed** for each agent run, republished as
+`gto_ai_agent_gateway_cost_usd{github_run_id, model, gto_review_runner}`.
+
+It exists because no agent can price itself. opencode reports `cost: 0` for a custom
+provider. Claude's CLI reports public list rates — measured at **2.1x** the booked figure.
+Deriving cost from token counts is exact for some models and off by −16% / +37% for others,
+which is the worst kind of wrong: plausible. The gateway's own log is the figure that
+decrements the key's budget, so it is not a calculation at all.
+
+It is a separate action rather than part of the agents because the spend log is admin-only:
+an agent's own CI key is refused (401), and a per-key delta cannot work when several agents
+share a key and run in parallel.
+
+Give it a LiteLLM `proxy_admin_viewer` key restricted to a non-existent model list, so it can
+read spend but cannot mint keys (403) or run inference (403). Never the master key.
+
+```yaml
+on:
+  schedule: [{cron: "*/15 * * * *"}]
+jobs:
+  export:
+    runs-on: <an in-cluster runner>   # the OTLP collector is cluster-local
+    steps:
+      - uses: gto-wizard/actions-templates/.github/actions/gateway-spend-export@<full-commit-sha>
+        with:
+          api-key: ${{ secrets.LITELLM_SPEND_VIEWER_KEY }}
+```
+
+It warns when tagged agent traffic arrives without a `run:<id>`, because that is the one
+failure that hides: a missing request reads as a lower bill rather than an error.

@@ -39,8 +39,8 @@ from gto_otlp import (  # noqa: E402 - sys.path must be set before this import
     otel_attributes,
     post_json,
     resource_attribute_env,
-    review_attributes,
-    review_metrics,
+    agent_attributes,
+    agent_metrics,
 )
 
 SCHEMA_VERSION = 1
@@ -721,8 +721,9 @@ def build_summary_payloads(
     attrs: dict[str, object] = {
         # The shared set, identical to the opencode reviewer's by construction rather than
         # by inspection — see `review_attributes`.
-        **review_attributes(
+        **agent_attributes(
             runner="claude",
+            task="pr_review",
             model=models,
             repository=metadata["github"]["repository"],
             change_number=pull_request["number"],
@@ -770,7 +771,7 @@ def build_summary_payloads(
             "resource": resource,
             "scopeMetrics": [{
                 "scope": scope,
-                "metrics": review_metrics(
+                "metrics": agent_metrics(
                     attrs,
                     observed_at_unix_nano=observed_at_unix_nano,
                     cost_usd=cost,
