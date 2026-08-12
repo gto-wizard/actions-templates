@@ -19,7 +19,7 @@ Shared GitHub Actions reusable workflows and composite actions used across all G
   - `argocd-sync-wait/` — ArgoCD sync + health wait (shell-based composite action)
   - `slack-release-payload-builder/` — Builds Slack Block Kit payloads (Python script)
   - `setup-warp/` — Cloudflare WARP in proxy mode for reaching internal services
-  - `claude-observability/` — Wraps one Claude Code call: OTel, PR timeline capture,
+  - `claude-review/` — Wraps one Claude Code call: OTel, PR timeline capture,
     portable change/complexity/risk classification, JSONL evidence (Python + unit tests)
   - `shared/` — `gto_otlp.py`: the OTLP encoding, transport, and pull-request identifier both
     review actions emit. Imported by sibling path; it has no suite of its own, so a change to
@@ -42,12 +42,12 @@ Hooks that run:
 - **yamllint** — lints YAML (120 char lines, 2-space indent, comments/truthy checks disabled)
 - **end-of-file-fixer** and **trailing-whitespace**
 
-There is no build step. Most of the repo is YAML; the two Python actions are stdlib-only
-so a runner can execute them before any dependency install. `claude-observability` carries
-unit tests — run them directly, they need nothing installed:
+There is no build step. Most of the repo is YAML; the Python actions are stdlib-only so a
+runner can execute them before any dependency install. Both reviewers and the shared wire
+carry unit tests — run them directly, they need nothing installed:
 
 ```bash
-for ACTION in .github/actions/claude-observability .github/actions/opencode-review; do
+for ACTION in .github/actions/shared .github/actions/claude-review .github/actions/opencode-review; do
   python3 -m unittest discover -s "$ACTION" -t "$ACTION"
 done
 ```

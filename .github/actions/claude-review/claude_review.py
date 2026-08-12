@@ -143,7 +143,7 @@ def github_get(path: str, token: str, *, paginate: bool = False) -> Any:
     headers = {
         "accept": "application/vnd.github+json",
         "x-github-api-version": "2022-11-28",
-        "user-agent": "gto-claude-observability",
+        "user-agent": "gto-claude-review",
         "authorization": f"Bearer {token}",
     }
     if not paginate:
@@ -318,7 +318,7 @@ def prepare() -> int:
     run_id = env("GITHUB_RUN_ID", "local")
     run_attempt = env("GITHUB_RUN_ATTEMPT", "1")
     runner_temp = Path(env("RUNNER_TEMP", "/tmp"))  # noqa: S108 - RUNNER_TEMP is always set on a runner
-    artifact_dir = runner_temp / "gto-claude-observability" / invocation
+    artifact_dir = runner_temp / "gto-claude-review" / invocation
     artifact_dir.mkdir(parents=True, exist_ok=True)
     # Deliberately outside artifact_dir: the classifier's HOME holds Claude
     # settings and session state that must never be uploaded wholesale.
@@ -762,7 +762,7 @@ def build_summary_payloads(
         **attrs,
     }
     resource = {"attributes": otel_attributes(resource_attrs)}
-    scope = {"name": "gto.actions.claude_observability", "version": str(SCHEMA_VERSION)}
+    scope = {"name": "gto.actions.claude_review", "version": str(SCHEMA_VERSION)}
     timestamp = str(observed_at_unix_nano)
     cost = report["total_cost_usd"]
     metrics = {
@@ -981,9 +981,9 @@ def main() -> int:
             return prepare()
         if command == "report":
             return report()
-        raise ValueError("usage: claude_observability.py <prepare|report>")
+        raise ValueError("usage: claude_review.py <prepare|report>")
     except (KeyError, IndexError, ValueError, RuntimeError, OSError) as error:
-        print(f"claude-observability: {error}", file=sys.stderr)
+        print(f"claude-review: {error}", file=sys.stderr)
         return 2
 
 

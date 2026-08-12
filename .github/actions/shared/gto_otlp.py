@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OTLP/HTTP encoding and transport, shared by every review action in this repository.
 
-Two actions ship PR-attributed telemetry — `claude-observability` and `opencode-review` —
+Two actions ship PR-attributed telemetry — `claude-review` and `opencode-review` —
 and they must agree on the wire or the dashboard filtering them is comparing two things that
 only look alike. So the encoding, the transport, the resource-attribute shape, and the
 pull-request identifier live here once rather than being copied per action.

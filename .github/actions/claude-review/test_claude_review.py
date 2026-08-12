@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-MODULE_PATH = Path(__file__).with_name("claude_observability.py")
-SPEC = importlib.util.spec_from_file_location("claude_observability", MODULE_PATH)
+MODULE_PATH = Path(__file__).with_name("claude_review.py")
+SPEC = importlib.util.spec_from_file_location("claude_review", MODULE_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)

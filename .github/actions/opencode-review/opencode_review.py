@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Portable `opencode` pull-request review against an OpenAI-compatible gateway.
 
-The sibling of `claude-observability`, for every model that is not Claude. Review policy
+The sibling of `claude-review`, for every model that is not Claude. Review policy
 belongs to the caller; this module owns the execution wire: the read-only opencode config,
 the prompt, the JSON event stream, and the normalized report.
 
@@ -18,7 +18,7 @@ Three contracts matter more than any feature here:
   not, and the report omits the field rather than publish a zero that reads as free.
 
 This module deliberately does NOT classify a pull request. Change type, complexity, and risk
-belong to `claude-observability`'s separate classifier pass, which is one model for every
+belong to `claude-review`'s separate classifier pass, which is one model for every
 repository on purpose; a second model re-deriving them would answer one question twice.
 """
 
@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
-# The OTLP wire is shared with `claude-observability`: both actions feed one dashboard, so the
+# The OTLP wire is shared with `claude-review`: both actions feed one dashboard, so the
 # encoding, the transport and the pull-request identifier have a single owner. For a `uses:`
 # reference GitHub checks out the whole repository, so this sibling path resolves on a runner
 # and in the unit tests alike.

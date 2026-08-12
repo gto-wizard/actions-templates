@@ -1,12 +1,12 @@
 name: opencode pull-request review
 description: Run one read-only opencode review of a pull request on any OpenAI-compatible gateway model
 
-# The sibling of `claude-observability`, for every model that is not Claude. The caller owns
+# The sibling of `claude-review`, for every model that is not Claude. The caller owns
 # trigger policy — who may run it, behind which label — and hardcodes ONE model per workflow,
 # so `kimi-pr-review.yml` and `deepseek-pr-review.yml` are each ~40 lines of gate plus this.
 #
 # It deliberately does not classify. Change type, complexity, and risk belong to
-# `claude-observability`'s separate classifier pass, which is one model for every repository
+# `claude-review`'s separate classifier pass, which is one model for every repository
 # on purpose; a second model re-deriving them would answer one question twice.
 
 inputs:
@@ -78,7 +78,7 @@ inputs:
   metrics-endpoint:
     description: >-
       OTLP/HTTP metrics endpoint. Tokens and findings per review, dimensioned the same way as
-      `claude-observability`'s cost metric so one dashboard can compare both runners. Pass an
+      `claude-review`'s cost metric so one dashboard can compare both runners. Pass an
       empty string to skip metrics.
     required: false
     default: http://alloy-alloy-general.alloy.svc.cluster.local:4318/v1/metrics
