@@ -25,8 +25,20 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+# The OTLP wire is shared with `opencode-review`: both actions feed one dashboard, so the
+# encoding, the transport and the pull-request identifier have a single owner. For a `uses:`
+# reference GitHub checks out the whole repository, so this sibling path resolves on a runner
+# and in the unit tests alike.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+
+from gto_otlp import (  # noqa: E402 - sys.path must be set before this import
+    change_ref,
+    otel_attributes,
+    post_json,
+    resource_attribute_env,
+)
 
 SCHEMA_VERSION = 1
 
@@ -102,18 +114,6 @@ def append_output(name: str, value: str) -> None:
 def safe_slug(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-.")
     return slug[:100] or "unknown"
-
-
-def change_ref(repository: str, number: object) -> str:
-    """``gto-brain#182`` — a pull-request identifier that survives being put in a dropdown.
-
-    `vcs.change.number` alone is ambiguous the moment a second repository runs a review, and
-    that is the dimension a dashboard filters on: `pr=182` silently mixes gto-brain#182 with
-    gto-universe#182 and reports the sum as one pull request's cost. The repository is already
-    its own attribute, so this exists purely to be *selectable* — short name, because a
-    dropdown of `gto-wizard/gto-brain#182` is mostly the same nine characters over and over.
-    """
-    return f"{repository.split('/')[-1] or repository}#{number}"
 
 
 def json_object(path: str) -> dict[str, Any]:
@@ -416,9 +416,7 @@ def prepare() -> int:
         "vcs.ref.base.revision": metadata["pull_request"]["base_sha"],
         "sample": "always",
     }
-    resource_attributes = ",".join(
-        f"{key}={quote(str(value), safe='-._~')}" for key, value in attrs.items() if str(value)
-    )
+    resource_attributes = resource_attribute_env(attrs)
     artifact_name = safe_slug(f"claude-pr-{repository}-{number}-{run_id}-{run_attempt}-{invocation}")
     append_output("artifact-dir", str(artifact_dir))
     append_output("artifact-name", artifact_name)
@@ -700,34 +698,6 @@ def merged_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
             if isinstance(first.get(key, 0), (int, float)) and isinstance(second.get(key, 0), (int, float))
         }
     return combined
-
-
-def otel_value(value: object) -> dict[str, object]:
-    if isinstance(value, bool):
-        return {"boolValue": value}
-    if isinstance(value, int):
-        return {"intValue": str(value)}
-    if isinstance(value, float):
-        return {"doubleValue": value}
-    return {"stringValue": str(value)}
-
-
-def otel_attributes(values: dict[str, object]) -> list[dict[str, object]]:
-    return [{"key": key, "value": otel_value(value)} for key, value in values.items()]
-
-
-def post_json(endpoint: str, payload: dict[str, Any]) -> None:
-    if not endpoint:
-        return
-    request = Request(
-        endpoint,
-        data=json.dumps(payload, separators=(",", ":")).encode(),
-        headers={"content-type": "application/json"},
-        method="POST",
-    )
-    with urlopen(request, timeout=15) as response:  # noqa: S310 - endpoints are workflow-controlled
-        if not 200 <= response.status < 300:
-            raise RuntimeError(f"OTLP endpoint returned HTTP {response.status}")
 
 
 def build_summary_payloads(

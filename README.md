@@ -250,3 +250,14 @@ Evidence artifact (14 days): `pr-metadata.json`, `pr.diff.patch`,
 
 Outputs: `verdict`, `findings`, `status`, `session-id`, `tokens-input`,
 `tokens-output`, `report-file`, `artifact-name`.
+
+**Telemetry.** Each run emits `gto_opencode_pr_review_tokens` (one metric, `kind` =
+input/output/reasoning/cache_read) and `gto_opencode_pr_review_findings` to Mimir, a
+`gto.opencode.pr_review.completed` event to Loki, and a `gto.opencode.pr_review` root
+span to Tempo — dimensioned exactly like `claude-observability`'s signals, plus
+`gto.review.runner="opencode"`, so **one dashboard can compare both runners**. There is
+no cost metric: opencode reports `cost: 0` for a custom provider, and the gateway's
+spend log for `api-key-alias` is the source of truth. Every signal carries
+`vcs.change.ref` (`gto-brain#182`) — filter on that, never on the bare number, which
+collides across repositories. Any endpoint set to an empty string skips that signal,
+and an unreachable collector warns without changing the review's verdict.

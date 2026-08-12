@@ -27,12 +27,30 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
+
+# The OTLP wire is shared with `claude-observability`: both actions feed one dashboard, so the
+# encoding, the transport and the pull-request identifier have a single owner. For a `uses:`
+# reference GitHub checks out the whole repository, so this sibling path resolves on a runner
+# and in the unit tests alike.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+
+from gto_otlp import (  # noqa: E402 - sys.path must be set before this import
+    change_ref,
+    gauge_metric,
+    log_envelope,
+    metrics_envelope,
+    new_trace_ids,
+    post_json,
+    span_envelope,
+)
 
 SCHEMA_VERSION = 1
 
@@ -615,6 +633,151 @@ def summary_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+SCOPE_NAME = "gto.actions.opencode_review"
+
+
+def telemetry_attributes(report: dict[str, Any]) -> dict[str, object]:
+    """The dimensions every opencode signal carries.
+
+    Deliberately the same shape as the Claude action's, minus cost: one dashboard filters both
+    runners, and a dimension that exists on only one of them cannot be used to compare them.
+    `vcs.change.ref` is the selectable pull-request identifier — a bare number collides across
+    repositories.
+    """
+    metadata = report["metadata"]
+    runner = report["runner"]
+    session = report["session"]
+    review = session.get("review") or {}
+    repository = str(metadata.get("repository", ""))
+    number = metadata.get("pr_number", "")
+    return {
+        "github.repository": repository,
+        "github.run.id": metadata.get("run_id", ""),
+        "github.run.attempt": metadata.get("run_attempt", ""),
+        "github.actor": metadata.get("actor", ""),
+        "vcs.change.number": number,
+        "vcs.change.ref": change_ref(repository, number),
+        "vcs.change.title": metadata.get("pr_title", ""),
+        "vcs.change.url": metadata.get("pr_url", ""),
+        "vcs.change.author": metadata.get("pr_author", ""),
+        "vcs.ref.head.name": metadata.get("head_ref", ""),
+        "vcs.ref.head.revision": metadata.get("head_sha", ""),
+        "vcs.ref.base.revision": metadata.get("base_sha", ""),
+        "vcs.change.files": metadata.get("changed_files") or 0,
+        "gto.review.runner": "opencode",
+        "gto.review.verdict": review.get("verdict") or "unusable",
+        "gto.review.findings": len(review.get("findings") or []),
+        "gto.review.steps": len(session.get("finish_reasons") or []),
+        "gto.review.tool_calls": len(session.get("tools") or []),
+        "gto.api_key.alias": env("INPUT_API_KEY_ALIAS"),
+        "gto.code.areas": env("INPUT_CODE_AREAS") or "repository",
+        "department": env("INPUT_DEPARTMENT"),
+        "team.id": env("INPUT_TEAM_ID"),
+        "model": f"{runner['provider']}/{runner['model']}",
+        "review.status": session["status"],
+        "review.success": not session["is_error"],
+    }
+
+
+def emit_telemetry(report: dict[str, Any], *, observed_at_unix_nano: int, duration_nanos: int) -> list[str]:
+    """Ship one metric, one event and one root span. Returns the failures, never raises.
+
+    Reporting never decides whether a review passed — the same contract the Claude action
+    holds. An unreachable collector warns; the verdict stands.
+    """
+    attributes = telemetry_attributes(report)
+    session = report["session"]
+    runner = report["runner"]
+    resource = {
+        "service.name": "gto-opencode-review",
+        "service.namespace": "gto-ai",
+        "service.instance.id": safe_slug(
+            f"github-run-{attributes['github.run.id']}-{attributes['github.run.attempt']}-{runner['model']}"
+        ),
+    }
+    trace_id, span_id = new_trace_ids(secrets.token_bytes)
+    tokens = session["tokens"]
+
+    # Tokens rather than dollars, because opencode reports `cost: 0` for a custom provider and
+    # a zero would read as free. `kind` keeps it one metric instead of four names.
+    metrics = [
+        gauge_metric(
+            "gto_opencode_pr_review_tokens",
+            description="Tokens billed by one opencode pull-request review, by kind",
+            unit="{token}",
+            value=tokens[kind],
+            attributes={**attributes, "kind": kind},
+            observed_at_unix_nano=observed_at_unix_nano,
+        )
+        for kind in ("input", "output", "reasoning", "cache_read")
+    ]
+    metrics.append(
+        gauge_metric(
+            "gto_opencode_pr_review_findings",
+            description="Findings reported by one opencode pull-request review",
+            unit="{finding}",
+            value=int(attributes["gto.review.findings"]),
+            attributes=attributes,
+            observed_at_unix_nano=observed_at_unix_nano,
+        )
+    )
+
+    event_attributes = {
+        **attributes,
+        "gto.review.problems": "; ".join(session["review_problems"])[:900] or "none",
+        "gto.review.tools": tool_histogram(session["tools"]),
+        "gto.review.session_id": session.get("id") or "",
+        "opencode.tokens.input": tokens["input"],
+        "opencode.tokens.output": tokens["output"],
+        "opencode.tokens.reasoning": tokens["reasoning"],
+        "opencode.tokens.cache_read": tokens["cache_read"],
+    }
+    signals = (
+        (
+            "metrics",
+            env("INPUT_METRICS_ENDPOINT"),
+            metrics_envelope(resource, SCOPE_NAME, metrics),
+        ),
+        (
+            "logs",
+            env("INPUT_LOGS_ENDPOINT"),
+            log_envelope(
+                resource,
+                SCOPE_NAME,
+                body="gto.opencode.pr_review.completed",
+                attributes=event_attributes,
+                observed_at_unix_nano=observed_at_unix_nano,
+                trace_id=trace_id,
+                span_id=span_id,
+            ),
+        ),
+        (
+            "traces",
+            env("INPUT_TRACES_ENDPOINT"),
+            span_envelope(
+                resource,
+                SCOPE_NAME,
+                name="gto.opencode.pr_review",
+                trace_id=trace_id,
+                span_id=span_id,
+                start_unix_nano=observed_at_unix_nano - duration_nanos,
+                end_unix_nano=observed_at_unix_nano,
+                attributes=event_attributes,
+                failed=session["is_error"],
+            ),
+        ),
+    )
+    failures: list[str] = []
+    for signal, endpoint, payload in signals:
+        if not endpoint:
+            continue
+        try:
+            post_json(endpoint, payload)
+        except (OSError, RuntimeError, ValueError) as error:
+            failures.append(f"{signal}: {error}")
+    return failures
+
+
 def report() -> int:
     """Normalize the event stream, write the artifact copy, the summary, and the outputs."""
     artifact_dir = Path(env("INPUT_ARTIFACT_DIR"))
@@ -643,6 +806,12 @@ def report() -> int:
     if step_summary:
         with Path(step_summary).open("a", encoding="utf-8") as stream:
             stream.write(summary_markdown(built))
+
+    duration_nanos = max(int(float(env("INPUT_DURATION_SECONDS", "0") or 0) * 1_000_000_000), 1)
+    failures = emit_telemetry(built, observed_at_unix_nano=time.time_ns(), duration_nanos=duration_nanos)
+    if failures:
+        # Reporting never decides whether a review passed: an unreachable collector warns.
+        print("::warning title=Telemetry not fully delivered::" + "; ".join(failures)[:400], flush=True)
 
     session = built["session"]
     review = session["review"] or {}

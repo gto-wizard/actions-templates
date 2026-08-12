@@ -59,6 +59,37 @@ inputs:
     description: "Token used to resolve the pull request. Needs `pull-requests: read`."
     required: false
     default: ${{ github.token }}
+  api-key-alias:
+    description: Safe service-key alias attached to telemetry; never pass a credential here.
+    required: false
+    default: ""
+  department:
+    description: Executive department attribution attached to telemetry.
+    required: false
+    default: ""
+  team-id:
+    description: Budget-holder team identifier attached to telemetry.
+    required: false
+    default: ""
+  code-areas:
+    description: Optional low-cardinality code areas supplied by the consumer.
+    required: false
+    default: repository
+  metrics-endpoint:
+    description: >-
+      OTLP/HTTP metrics endpoint. Tokens and findings per review, dimensioned the same way as
+      `claude-observability`'s cost metric so one dashboard can compare both runners. Pass an
+      empty string to skip metrics.
+    required: false
+    default: http://alloy-alloy-general.alloy.svc.cluster.local:4318/v1/metrics
+  traces-endpoint:
+    description: OTLP/HTTP traces endpoint. Empty string skips the root span.
+    required: false
+    default: http://alloy-alloy-general.alloy.svc.cluster.local:4318/v1/traces
+  logs-endpoint:
+    description: OTLP/HTTP logs endpoint. Empty string skips the event.
+    required: false
+    default: https://loki.services.gtowiz.com/otlp/v1/logs
   artifact-retention-days:
     description: Retention for the private evidence artifact.
     required: false
@@ -226,6 +257,7 @@ runs:
         EXEC_FILE="$ARTIFACT_DIR/opencode-events.jsonl"
         echo "execution-file=$EXEC_FILE" >> "$GITHUB_OUTPUT"
         echo "Reviewing with $MODEL_ALIAS; this log shows tool names and step tokens only."
+        STARTED="$(date +%s)"
         # `--pure` refuses `.opencode/plugin` code from the checkout. `--title` skips
         # opencode's own title-generation request, which would spend a second call naming a
         # session nobody opens.
@@ -245,6 +277,7 @@ runs:
           echo "::warning title=opencode review timed out::stopped after ${TIMEOUT_SECONDS}s; the partial stream is still reported"
         fi
         echo "exit-code=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "duration-seconds=$(( $(date +%s) - STARTED ))" >> "$GITHUB_OUTPUT"
 
     - name: Report the review
       id: report
@@ -257,6 +290,14 @@ runs:
         INPUT_EXIT_CODE: ${{ steps.run.outputs.exit-code || '1' }}
         INPUT_MODEL: ${{ steps.prepare.outputs.model }}
         INPUT_PROVIDER_ID: ${{ inputs.provider-id }}
+        INPUT_DURATION_SECONDS: ${{ steps.run.outputs.duration-seconds }}
+        INPUT_API_KEY_ALIAS: ${{ inputs.api-key-alias }}
+        INPUT_DEPARTMENT: ${{ inputs.department }}
+        INPUT_TEAM_ID: ${{ inputs.team-id }}
+        INPUT_CODE_AREAS: ${{ inputs.code-areas }}
+        INPUT_METRICS_ENDPOINT: ${{ inputs.metrics-endpoint }}
+        INPUT_TRACES_ENDPOINT: ${{ inputs.traces-endpoint }}
+        INPUT_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
       run: python3 "${{ github.action_path }}/opencode_review.py" report
 
     # Private and short-lived: the event stream and the captured diff contain code and file
