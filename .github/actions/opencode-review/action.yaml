@@ -1,0 +1,231 @@
+name: opencode pull-request review
+description: Run one read-only opencode review of a pull request on any OpenAI-compatible gateway model
+
+# The sibling of `claude-observability`, for every model that is not Claude. The caller owns
+# trigger policy — who may run it, behind which label — and hardcodes ONE model per workflow,
+# so `kimi-pr-review.yml` and `deepseek-pr-review.yml` are each ~40 lines of gate plus this.
+#
+# It deliberately does not classify. Change type, complexity, and risk belong to
+# `claude-observability`'s separate classifier pass, which is one model for every repository
+# on purpose; a second model re-deriving them would answer one question twice.
+
+inputs:
+  pr-number:
+    description: Pull request to review. Its head must be in this repository.
+    required: true
+  api-key:
+    description: >-
+      Virtual key for the gateway, e.g. a LiteLLM key. Passed to the run as an env var the
+      generated config dereferences, so no config file ever contains a credential.
+    required: true
+  model:
+    description: Model id as the gateway serves it — kimi-k3, glm-5.2, qwen3.8-max, deepseek-v4-pro.
+    required: false
+    default: kimi-k3
+  gateway-url:
+    description: OpenAI-compatible base URL, including any /v1 suffix.
+    required: false
+    default: https://llm.gtowiz.com/v1
+  provider-id:
+    description: Provider name in the generated config; also the model alias prefix.
+    required: false
+    default: gtowizard
+  opencode-version:
+    description: >-
+      Pinned CLI version. `latest` would silently change the reviewer, and the JSON event
+      stream this action parses is not a stable interface.
+    required: false
+    default: 1.18.16
+  timeout-seconds:
+    description: >-
+      Hard bound on the review. opencode documents no step, iteration, or tool-call limit, so
+      without this the only bound is the caller's job timeout — which kills the reporting
+      steps too. On expiry the run is interrupted and whatever it produced is still reported.
+    required: false
+    default: "900"
+  extra-instructions:
+    description: Optional repository-specific guidance appended to the review prompt.
+    required: false
+    default: ""
+  base-sha:
+    description: Override the base revision. Defaults to the pull request's own base.
+    required: false
+    default: ""
+  head-sha:
+    description: Override the head revision. Defaults to the pull request's own head.
+    required: false
+    default: ""
+  github-token:
+    description: "Token used to resolve the pull request. Needs `pull-requests: read`."
+    required: false
+    default: ${{ github.token }}
+  artifact-retention-days:
+    description: Retention for the private evidence artifact.
+    required: false
+    default: "14"
+  python-version:
+    description: >-
+      Python provisioned for this action's own scripts. ARC runners ship without Python. Pass
+      an empty string when the caller already guarantees python3.
+    required: false
+    default: "3.13"
+
+outputs:
+  verdict:
+    description: approve, comment, request_changes — empty when the answer was unusable.
+    value: ${{ steps.report.outputs.verdict }}
+  findings:
+    description: Number of findings reported.
+    value: ${{ steps.report.outputs.findings }}
+  status:
+    description: success, or error when opencode failed or the answer was unusable.
+    value: ${{ steps.report.outputs.status }}
+  session-id:
+    description: opencode session id.
+    value: ${{ steps.report.outputs.session-id }}
+  tokens-input:
+    description: Billable input tokens summed across steps.
+    value: ${{ steps.report.outputs.tokens-input }}
+  tokens-output:
+    description: Output tokens summed across steps. Zero when the route does not report them.
+    value: ${{ steps.report.outputs.tokens-output }}
+  report-file:
+    description: Path to the normalized run report.
+    value: ${{ steps.report.outputs.report-file }}
+  artifact-name:
+    description: Name of the uploaded private evidence artifact.
+    value: ${{ steps.prepare.outputs.artifact-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Provision Python for this action
+      if: inputs.python-version != ''
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # pin@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    # Resolves the pull request, refuses a fork's head and a checkout that carries its own
+    # opencode config, captures the immutable diff, and writes the prompt and the read-only
+    # config. Computed once here so the shell steps below stay declarative.
+    - name: Prepare the review
+      id: prepare
+      shell: bash
+      env:
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_PROVIDER_ID: ${{ inputs.provider-id }}
+        INPUT_GATEWAY_URL: ${{ inputs.gateway-url }}
+        INPUT_BASE_SHA: ${{ inputs.base-sha }}
+        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_EXTRA_INSTRUCTIONS: ${{ inputs.extra-instructions }}
+      run: python3 "${{ github.action_path }}/opencode_review.py" prepare
+
+    - name: Install opencode (pinned)
+      shell: bash
+      env:
+        # The installer hardcodes $HOME/.opencode/bin, so an isolated HOME is also how the
+        # binary gets isolated: nothing on the runner leaks into the review, and the review
+        # leaves nothing behind. Models in a panel share a fleet but never a home.
+        HOME: ${{ steps.prepare.outputs.home-dir }}
+        VERSION: ${{ inputs.opencode-version }}
+      run: |
+        set -euo pipefail
+        curl -fsSL https://opencode.ai/install | bash
+        "$HOME/.opencode/bin/opencode" --version
+
+    # `continue-on-error` does not exist for composite steps, so the exit code is captured
+    # here and acted on by the last step. Everything between them is reporting, and reporting
+    # never decides whether a review passed.
+    - name: Run the read-only review
+      id: run
+      shell: bash
+      env:
+        HOME: ${{ steps.prepare.outputs.home-dir }}
+        ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
+        PROMPT_FILE: ${{ steps.prepare.outputs.prompt-file }}
+        CONFIG_FILE: ${{ steps.prepare.outputs.config-file }}
+        MODEL_ALIAS: ${{ steps.prepare.outputs.model-alias }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        # The name the generated provider block dereferences as `{env:…}`.
+        OPENCODE_GATEWAY_API_KEY: ${{ inputs.api-key }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -uo pipefail
+        export PATH="$HOME/.opencode/bin:$PATH"
+        # opencode merges config from eight sources and a repository's own `opencode.json`
+        # outranks the OPENCODE_CONFIG path. Inline content outranks the checkout, which is
+        # what keeps a reviewed diff from configuring its own reviewer.
+        OPENCODE_CONFIG_CONTENT="$(cat "$CONFIG_FILE")"
+        export OPENCODE_CONFIG_CONTENT
+        # An empty config is the one failure that looks like success: opencode would fall back
+        # to its default agent, its own provider list and NO permission restrictions, then
+        # review away. Fail here instead.
+        [ -n "$OPENCODE_CONFIG_CONTENT" ] || { echo "::error::the generated opencode config is empty"; exit 1; }
+        [ -s "$PROMPT_FILE" ] || { echo "::error::the generated review prompt is empty"; exit 1; }
+        EXEC_FILE="$ARTIFACT_DIR/opencode-events.jsonl"
+        echo "execution-file=$EXEC_FILE" >> "$GITHUB_OUTPUT"
+        echo "Reviewing with $MODEL_ALIAS; this log shows tool names and step tokens only."
+        # `--pure` refuses `.opencode/plugin` code from the checkout. `--title` skips
+        # opencode's own title-generation request, which would spend a second call naming a
+        # session nobody opens.
+        timeout --signal=INT "$TIMEOUT_SECONDS" \
+          opencode run \
+            --format json \
+            --pure \
+            --print-logs --log-level WARN \
+            --agent gto-review \
+            --model "$MODEL_ALIAS" \
+            --title "PR #$PR_NUMBER review" \
+            "$(cat "$PROMPT_FILE")" \
+          | tee "$EXEC_FILE" \
+          | python3 "$ACTION_PATH/opencode_review.py" render-stream
+        STATUS="${PIPESTATUS[0]}"
+        if [ "$STATUS" = "124" ]; then
+          echo "::warning title=opencode review timed out::stopped after ${TIMEOUT_SECONDS}s; the partial stream is still reported"
+        fi
+        echo "exit-code=$STATUS" >> "$GITHUB_OUTPUT"
+
+    - name: Report the review
+      id: report
+      if: always() && steps.prepare.outputs.artifact-dir != ''
+      shell: bash
+      env:
+        INPUT_ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
+        INPUT_METADATA_FILE: ${{ steps.prepare.outputs.metadata-file }}
+        INPUT_EXECUTION_FILE: ${{ steps.run.outputs.execution-file }}
+        INPUT_EXIT_CODE: ${{ steps.run.outputs.exit-code || '1' }}
+        INPUT_MODEL: ${{ steps.prepare.outputs.model }}
+        INPUT_PROVIDER_ID: ${{ inputs.provider-id }}
+      run: python3 "${{ github.action_path }}/opencode_review.py" report
+
+    # Private and short-lived: the event stream and the captured diff contain code and file
+    # contents. The action log deliberately carries none of that.
+    - name: Upload the private review evidence
+      if: always() && steps.prepare.outputs.artifact-dir != ''
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4.6.2
+      with:
+        name: ${{ steps.prepare.outputs.artifact-name }}
+        path: ${{ steps.prepare.outputs.artifact-dir }}
+        retention-days: ${{ inputs.artifact-retention-days }}
+        if-no-files-found: warn
+
+    # Restore the review's own verdict. The action is red when opencode failed — NOT when a
+    # model returned an unusable answer, which is a finding about that model, reported as a
+    # warning and in the job summary. In a panel that matters twice over: one model's bad
+    # answer must not paint the whole comparison red.
+    - name: Preserve the review's outcome
+      if: always()
+      shell: bash
+      env:
+        STATUS: ${{ steps.run.outputs.exit-code }}
+      run: |
+        set -euo pipefail
+        if [ "${STATUS:-1}" != "0" ]; then
+          echo "::error title=opencode review failed::the run ended with exit ${STATUS:-unknown}; the report and artifact were still collected."
+          exit 1
+        fi
+        echo "opencode review completed."
