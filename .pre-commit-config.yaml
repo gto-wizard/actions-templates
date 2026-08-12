@@ -19,11 +19,12 @@ repos:
     hooks:
       # Every workflow in this repo is workflow_call, so there is no CI job to
       # hang tests on. Pre-commit is the only gate the repo has.
-      # The shared OTLP wire has no tests of its own: it is exercised by both action suites,
-      # and a change to it must run both or it can break the one it was not written for.
+      # The shared wire now owns the review schema itself, so it has its own suite -- and a
+      # change to it still runs both action suites, because it can break the one it was not
+      # written for.
       - id: shared-otlp-tests
-        name: both action suites (shared OTLP wire)
-        entry: bash -c 'for a in .github/actions/claude-observability .github/actions/opencode-review; do python3 -m unittest discover -s "$a" -t "$a" || exit 1; done'
+        name: shared wire + both action suites
+        entry: bash -c 'for a in .github/actions/shared .github/actions/claude-review .github/actions/opencode-review; do python3 -m unittest discover -s "$a" -t "$a" || exit 1; done'
         language: system
         pass_filenames: false
         files: ^\.github/actions/shared/
@@ -33,9 +34,9 @@ repos:
         language: system
         pass_filenames: false
         files: ^\.github/actions/opencode-review/
-      - id: claude-observability-tests
-        name: claude-observability unit tests
-        entry: python3 -m unittest discover -s .github/actions/claude-observability -t .github/actions/claude-observability
+      - id: claude-review-tests
+        name: claude-review unit tests
+        entry: python3 -m unittest discover -s .github/actions/claude-review -t .github/actions/claude-review
         language: system
         pass_filenames: false
-        files: ^\.github/actions/claude-observability/
+        files: ^\.github/actions/claude-review/

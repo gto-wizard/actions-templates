@@ -1,5 +1,5 @@
-name: Claude execution with PR observability
-description: Run one Claude Code invocation, classify its PR, export OTel, and retain private JSONL evidence
+name: Claude pull-request review
+description: Run one Claude review of a pull request, classify the change, export OTel, and retain private JSONL evidence
 
 inputs:
   prompt:
@@ -218,7 +218,7 @@ runs:
         INPUT_SESSION_MODE: ${{ inputs.session-mode }}
         INPUT_SESSION_ID: ${{ inputs.session-id }}
         INPUT_CLASSIFIER_MODEL: ${{ inputs.classifier-model }}
-      run: python3 "${{ github.action_path }}/claude_observability.py" prepare
+      run: python3 "${{ github.action_path }}/claude_review.py" prepare
 
     # The caller's own review. claude-code-action owns the CLI: it installs the
     # pinned runtime, execs it with the argv we hand it via `claude_args`, and
@@ -262,6 +262,10 @@ runs:
         OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
         OTEL_RESOURCE_ATTRIBUTES: ${{ steps.prepare.outputs.resource-attributes }}
         TRACEPARENT: ${{ steps.prepare.outputs.traceparent }}
+        # Tags this run's gateway spend so it can be attributed to the review instead of
+        # pooling into one anonymous `User-Agent: claude-cli` bucket. Ignored by the
+        # Anthropic API directly; only the LiteLLM gateway reads it.
+        ANTHROPIC_CUSTOM_HEADERS: "x-litellm-tags: ${{ steps.prepare.outputs.litellm-tags }}"
       with:
         prompt: ${{ inputs.prompt }}
         claude_args: ${{ steps.prepare.outputs.review-claude-args }}
@@ -323,6 +327,7 @@ runs:
         OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
         OTEL_RESOURCE_ATTRIBUTES: ${{ steps.prepare.outputs.classifier-resource-attributes }}
         TRACEPARENT: ${{ steps.prepare.outputs.traceparent }}
+        ANTHROPIC_CUSTOM_HEADERS: "x-litellm-tags: ${{ steps.prepare.outputs.litellm-tags }}"
       with:
         prompt: ${{ steps.prepare.outputs.classifier-prompt }}
         claude_args: ${{ steps.prepare.outputs.classifier-claude-args }}
@@ -347,7 +352,7 @@ runs:
         OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${{ inputs.metrics-endpoint }}
         OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ inputs.traces-endpoint }}
         OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
-      run: python3 "${{ github.action_path }}/claude_observability.py" report
+      run: python3 "${{ github.action_path }}/claude_review.py" report
 
     - name: Upload private Claude execution evidence
       if: always()

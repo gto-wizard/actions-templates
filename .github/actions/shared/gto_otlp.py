@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OTLP/HTTP encoding and transport, shared by every review action in this repository.
 
-Two actions ship PR-attributed telemetry — `claude-observability` and `opencode-review` —
+Two actions ship PR-attributed telemetry — `claude-review` and `opencode-review` —
 and they must agree on the wire or the dashboard filtering them is comparing two things that
 only look alike. So the encoding, the transport, the resource-attribute shape, and the
 pull-request identifier live here once rather than being copied per action.
@@ -192,6 +192,155 @@ def span_envelope(
             }
         ]
     }
+
+
+# --- the review schema ------------------------------------------------------------------
+#
+# One name per concept, emitted by every reviewer whatever CLI it wraps. Before this, the
+# Claude action emitted `gto.claude.pr_review.cost_usd` and the opencode action emitted
+# `gto.opencode.pr_review.findings`, which meant "a review ran" had two answers and a
+# dashboard could only count runs by unioning two metric names — and any label added to one
+# family silently failed to appear on the other. The runner is a *label*, not a name.
+
+REVIEW_METRIC_RUNS = "gto.ai.review.runs"
+REVIEW_METRIC_COST = "gto.ai.review.cost_usd"
+REVIEW_METRIC_TOKENS = "gto.ai.review.tokens"
+REVIEW_METRIC_FINDINGS = "gto.ai.review.findings"
+
+
+def review_attributes(
+    *,
+    runner: str,
+    model: str,
+    repository: str,
+    change_number: object,
+    status: str,
+    success: bool,
+    change_title: str = "",
+    change_url: str = "",
+    change_author: str = "",
+    changed_files: object = 0,
+    head_ref: str = "",
+    head_revision: str = "",
+    base_revision: str = "",
+    run_id: object = "",
+    run_attempt: object = "",
+    actor: str = "",
+    api_key_alias: str = "",
+    code_areas: str = "",
+    department: str = "",
+    team_id: str = "",
+) -> dict[str, object]:
+    """The dimensions EVERY AI review carries, whichever CLI produced it.
+
+    This is the set a dashboard filters and groups on, so it lives in exactly one place.
+    A runner with extra facts (a classification, a verdict) merges them on top of this —
+    what it must not do is spell one of *these* differently, which is precisely what
+    happened while each action owned its own copy: `vcs.change.ref` reached the opencode
+    reviewer and never reached the Claude one, so filtering by pull request dropped every
+    Claude run without saying so.
+    """
+    return {
+        "github.repository": repository,
+        "github.run.id": run_id,
+        "github.run.attempt": run_attempt,
+        "github.actor": actor,
+        "vcs.change.number": change_number,
+        "vcs.change.ref": change_ref(repository, change_number),
+        "vcs.change.title": change_title,
+        "vcs.change.url": change_url,
+        "vcs.change.author": change_author,
+        "vcs.change.files": changed_files or 0,
+        "vcs.ref.head.name": head_ref,
+        "vcs.ref.head.revision": head_revision,
+        "vcs.ref.base.revision": base_revision,
+        "gto.review.runner": runner,
+        "gto.api_key.alias": api_key_alias,
+        "gto.code.areas": code_areas or "repository",
+        "department": department,
+        "team.id": team_id,
+        "model": model,
+        "review.status": status,
+        "review.success": success,
+    }
+
+
+def review_metrics(
+    attributes: dict[str, object],
+    *,
+    observed_at_unix_nano: int,
+    cost_usd: float | None = None,
+    tokens: dict[str, int] | None = None,
+    findings: int | None = None,
+) -> list[dict[str, Any]]:
+    """Every gauge one completed review contributes.
+
+    `runs` is unconditional and is the series to count: a review that produced no cost, no
+    tokens and no findings still happened, and a dashboard that counts a *cost* metric is
+    really counting "reviews whose runner happened to know its own price".
+
+    The other three are absent when the runner cannot report them. Absent, not zero — a
+    zero dollar review reads as free, which is the specific lie this whole exercise exists
+    to avoid.
+    """
+    metrics = [
+        gauge_metric(
+            REVIEW_METRIC_RUNS,
+            description="One completed AI pull-request review",
+            unit="{run}",
+            value=1,
+            attributes=attributes,
+            observed_at_unix_nano=observed_at_unix_nano,
+        )
+    ]
+    if cost_usd is not None:
+        metrics.append(
+            gauge_metric(
+                REVIEW_METRIC_COST,
+                description="Exact cost of one AI pull-request review, as reported by its runner",
+                unit="USD",
+                value=float(cost_usd),
+                attributes=attributes,
+                observed_at_unix_nano=observed_at_unix_nano,
+            )
+        )
+    for kind, value in (tokens or {}).items():
+        metrics.append(
+            gauge_metric(
+                REVIEW_METRIC_TOKENS,
+                description="Tokens billed by one AI pull-request review, by kind",
+                unit="{token}",
+                value=int(value),
+                attributes={**attributes, "kind": kind},
+                observed_at_unix_nano=observed_at_unix_nano,
+            )
+        )
+    if findings is not None:
+        metrics.append(
+            gauge_metric(
+                REVIEW_METRIC_FINDINGS,
+                description="Findings reported by one AI pull-request review",
+                unit="{finding}",
+                value=int(findings),
+                attributes=attributes,
+                observed_at_unix_nano=observed_at_unix_nano,
+            )
+        )
+    return metrics
+
+
+def litellm_tags(*, runner: str, model: str, run_id: object) -> str:
+    """The `x-litellm-tags` value that makes gateway spend attributable to this run.
+
+    Without it every reviewer's requests land in one `User-Agent: opencode` bucket and the
+    money cannot be split by pull request, model or run — measured: $10.96 of real spend,
+    unattributable. `run:<id>` is the join key back to the metrics above.
+
+    Deliberately four tags, only one of them unbounded: LiteLLM stores a row per distinct
+    tag, so `ref:<repo#number>` would add a second unbounded family for no extra reach that
+    `run:<id>` does not already give via the run's own telemetry.
+    """
+    return ",".join(("gto-ai-review", f"runner:{runner}", f"model:{model}", f"run:{run_id}"))
 
 
 def new_trace_ids(random_bytes) -> tuple[str, str]:

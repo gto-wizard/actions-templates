@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-MODULE_PATH = Path(__file__).with_name("claude_observability.py")
-SPEC = importlib.util.spec_from_file_location("claude_observability", MODULE_PATH)
+MODULE_PATH = Path(__file__).with_name("claude_review.py")
+SPEC = importlib.util.spec_from_file_location("claude_review", MODULE_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
@@ -496,13 +496,18 @@ class SummaryPayloadTest(unittest.TestCase):
         }
 
         payloads = MODULE.build_summary_payloads(metadata, report, observed_at_unix_nano=2_000_000_000)
-        metric = payloads["metrics"]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0]
+        emitted = payloads["metrics"]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+        by_name = {m["name"]: m for m in emitted}
+        metric = by_name["gto.ai.review.cost_usd"]
         labels = {
             item["key"]: next(iter(item["value"].values()))
             for item in metric["gauge"]["dataPoints"][0]["attributes"]
         }
 
-        self.assertEqual("gto.claude.pr_review.cost_usd", metric["name"])
+        # Runner-neutral names shared with the opencode action, and a `runs` series that
+        # exists whether or not the runner could price itself.
+        self.assertEqual({"gto.ai.review.runs", "gto.ai.review.cost_usd"}, set(by_name))
+        self.assertEqual("claude", labels["gto.review.runner"])
         self.assertEqual(0.5, metric["gauge"]["dataPoints"][0]["asDouble"])
         self.assertEqual("hard", labels["gto.review.complexity"])
         self.assertEqual("safe", labels["gto.review.risk"])

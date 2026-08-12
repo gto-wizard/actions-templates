@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Portable `opencode` pull-request review against an OpenAI-compatible gateway.
 
-The sibling of `claude-observability`, for every model that is not Claude. Review policy
+The sibling of `claude-review`, for every model that is not Claude. Review policy
 belongs to the caller; this module owns the execution wire: the read-only opencode config,
 the prompt, the JSON event stream, and the normalized report.
 
@@ -18,7 +18,7 @@ Three contracts matter more than any feature here:
   not, and the report omits the field rather than publish a zero that reads as free.
 
 This module deliberately does NOT classify a pull request. Change type, complexity, and risk
-belong to `claude-observability`'s separate classifier pass, which is one model for every
+belong to `claude-review`'s separate classifier pass, which is one model for every
 repository on purpose; a second model re-deriving them would answer one question twice.
 """
 
@@ -36,19 +36,20 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
-# The OTLP wire is shared with `claude-observability`: both actions feed one dashboard, so the
+# The OTLP wire is shared with `claude-review`: both actions feed one dashboard, so the
 # encoding, the transport and the pull-request identifier have a single owner. For a `uses:`
 # reference GitHub checks out the whole repository, so this sibling path resolves on a runner
 # and in the unit tests alike.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
 
 from gto_otlp import (  # noqa: E402 - sys.path must be set before this import
-    change_ref,
-    gauge_metric,
+    litellm_tags,
     log_envelope,
     metrics_envelope,
     new_trace_ids,
     post_json,
+    review_attributes,
+    review_metrics,
     span_envelope,
 )
 
@@ -153,9 +154,13 @@ def review_config(
     provider_id: str = DEFAULT_PROVIDER_ID,
     gateway_url: str = DEFAULT_GATEWAY_URL,
     api_key_env: str = API_KEY_ENV,
+    run_id: object = "",
 ) -> dict[str, Any]:
     """The inline opencode config for one read-only review run."""
     alias = f"{provider_id}/{model}"
+    # Every request carries the run id, so the gateway's spend log can be split by review
+    # instead of pooling into one anonymous `User-Agent: opencode` bucket.
+    tags = litellm_tags(runner="opencode", model=alias, run_id=run_id)
     agent = {
         "description": "Read-only pull-request reviewer for CI.",
         "mode": "primary",
@@ -169,7 +174,11 @@ def review_config(
             provider_id: {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "LLM gateway",
-                "options": {"baseURL": gateway_url, "apiKey": f"{{env:{api_key_env}}}"},
+                "options": {
+                    "baseURL": gateway_url,
+                    "apiKey": f"{{env:{api_key_env}}}",
+                    "headers": {"x-litellm-tags": tags},
+                },
                 # One model, not the gateway's whole catalogue: the run is pinned to what the
                 # caller asked for, so a typo in the id fails loudly instead of silently
                 # resolving to somebody's default.
@@ -335,7 +344,12 @@ def prepare() -> int:
     # config file in a downloadable artifact invites somebody to reuse it as one.
     config_file = home_dir / "opencode-config.json"
     config_file.write_text(
-        json.dumps(review_config(model, provider_id=provider, gateway_url=gateway), separators=(",", ":")),
+        json.dumps(
+            review_config(
+                model, provider_id=provider, gateway_url=gateway, run_id=metadata["run_id"]
+            ),
+            separators=(",", ":"),
+        ),
         encoding="utf-8",
     )
 
@@ -683,47 +697,45 @@ SCOPE_NAME = "gto.actions.opencode_review"
 
 
 def telemetry_attributes(report: dict[str, Any]) -> dict[str, object]:
-    """The dimensions every opencode signal carries.
+    """The shared review dimensions, plus the facts only this runner produces.
 
-    Deliberately the same shape as the Claude action's, minus cost: one dashboard filters both
-    runners, and a dimension that exists on only one of them cannot be used to compare them.
-    `vcs.change.ref` is the selectable pull-request identifier — a bare number collides across
-    repositories.
+    The common set comes from `review_attributes` so it cannot drift from the Claude
+    action's — the two used to keep private copies, and a label added to one quietly did
+    not exist on the other.
     """
     metadata = report["metadata"]
     runner = report["runner"]
     session = report["session"]
     review = session.get("review") or {}
-    repository = str(metadata.get("repository", ""))
-    number = metadata.get("pr_number", "")
     return {
-        "github.repository": repository,
-        "github.run.id": metadata.get("run_id", ""),
-        "github.run.attempt": metadata.get("run_attempt", ""),
-        "github.actor": metadata.get("actor", ""),
-        "vcs.change.number": number,
-        "vcs.change.ref": change_ref(repository, number),
-        "vcs.change.title": metadata.get("pr_title", ""),
-        "vcs.change.url": metadata.get("pr_url", ""),
-        "vcs.change.author": metadata.get("pr_author", ""),
-        "vcs.ref.head.name": metadata.get("head_ref", ""),
-        "vcs.ref.head.revision": metadata.get("head_sha", ""),
-        "vcs.ref.base.revision": metadata.get("base_sha", ""),
-        "vcs.change.files": metadata.get("changed_files") or 0,
-        "gto.review.runner": "opencode",
+        **review_attributes(
+            runner="opencode",
+            model=f"{runner['provider']}/{runner['model']}",
+            repository=str(metadata.get("repository", "")),
+            change_number=metadata.get("pr_number", ""),
+            status=session["status"],
+            success=not session["is_error"],
+            change_title=metadata.get("pr_title", ""),
+            change_url=metadata.get("pr_url", ""),
+            change_author=metadata.get("pr_author", ""),
+            changed_files=metadata.get("changed_files") or 0,
+            head_ref=metadata.get("head_ref", ""),
+            head_revision=metadata.get("head_sha", ""),
+            base_revision=metadata.get("base_sha", ""),
+            run_id=metadata.get("run_id", ""),
+            run_attempt=metadata.get("run_attempt", ""),
+            actor=metadata.get("actor", ""),
+            api_key_alias=env("INPUT_API_KEY_ALIAS"),
+            code_areas=env("INPUT_CODE_AREAS"),
+            department=env("INPUT_DEPARTMENT"),
+            team_id=env("INPUT_TEAM_ID"),
+        ),
         # Falls back to the run's status, not to "unusable": a cancelled or timed-out run
         # never got to answer, and recording that as a model verdict is a lie in a dashboard.
         "gto.review.verdict": review.get("verdict") or session["status"],
         "gto.review.findings": len(review.get("findings") or []),
         "gto.review.steps": len(session.get("finish_reasons") or []),
         "gto.review.tool_calls": len(session.get("tools") or []),
-        "gto.api_key.alias": env("INPUT_API_KEY_ALIAS"),
-        "gto.code.areas": env("INPUT_CODE_AREAS") or "repository",
-        "department": env("INPUT_DEPARTMENT"),
-        "team.id": env("INPUT_TEAM_ID"),
-        "model": f"{runner['provider']}/{runner['model']}",
-        "review.status": session["status"],
-        "review.success": not session["is_error"],
     }
 
 
@@ -746,28 +758,16 @@ def emit_telemetry(report: dict[str, Any], *, observed_at_unix_nano: int, durati
     trace_id, span_id = new_trace_ids(secrets.token_bytes)
     tokens = session["tokens"]
 
-    # Tokens rather than dollars, because opencode reports `cost: 0` for a custom provider and
-    # a zero would read as free. `kind` keeps it one metric instead of four names.
-    metrics = [
-        gauge_metric(
-            "gto_opencode_pr_review_tokens",
-            description="Tokens billed by one opencode pull-request review, by kind",
-            unit="{token}",
-            value=tokens[kind],
-            attributes={**attributes, "kind": kind},
-            observed_at_unix_nano=observed_at_unix_nano,
-        )
-        for kind in ("input", "output", "reasoning", "cache_read")
-    ]
-    metrics.append(
-        gauge_metric(
-            "gto_opencode_pr_review_findings",
-            description="Findings reported by one opencode pull-request review",
-            unit="{finding}",
-            value=int(attributes["gto.review.findings"]),
-            attributes=attributes,
-            observed_at_unix_nano=observed_at_unix_nano,
-        )
+    # No cost: opencode prices from models.dev, which does not know this provider, so it
+    # reports `cost: 0` for every request. Deriving dollars from the tokens below does not
+    # work either — they are per-message, not per-session, and reconcile ~4x low against the
+    # gateway's own booking. The gateway is the authority; `x-litellm-tags` carries the run
+    # id so it can be joined back to these series.
+    metrics = review_metrics(
+        attributes,
+        observed_at_unix_nano=observed_at_unix_nano,
+        tokens={kind: tokens[kind] for kind in ("input", "output", "reasoning", "cache_read")},
+        findings=int(attributes["gto.review.findings"]),
     )
 
     event_attributes = {
