@@ -132,7 +132,22 @@ runs:
         VERSION: ${{ inputs.opencode-version }}
       run: |
         set -euo pipefail
-        curl -fsSL https://opencode.ai/install | bash
+        # Retried, because this is a shared external dependency fetched by every reviewer in
+        # a panel at the same instant. First real multi-model run: two of four jobs died here
+        # with curl exit 56 (failure receiving network data) while their siblings installed
+        # fine. Losing a reviewer to a transient download is not a review result.
+        for attempt in 1 2 3 4 5; do
+          if curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 \
+            https://opencode.ai/install | bash; then
+            break
+          fi
+          if [ "$attempt" = "5" ]; then
+            echo "::error title=opencode install failed::5 attempts against opencode.ai/install"
+            exit 1
+          fi
+          echo "install attempt $attempt failed; retrying in $((attempt * 5))s"
+          sleep "$((attempt * 5))"
+        done
         "$HOME/.opencode/bin/opencode" --version
 
     # `continue-on-error` does not exist for composite steps, so the exit code is captured
@@ -154,6 +169,11 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -uo pipefail
+        # errexit OFF, deliberately. GitHub runs composite `run` steps under `bash -e`, so a
+        # non-zero review pipeline aborts this step at the pipeline itself and never reaches
+        # the `exit-code` output below — after which the final step can only report "exit
+        # unknown" and the report gets a fabricated 1. Observed on the first real run.
+        set +e
         export PATH="$HOME/.opencode/bin:$PATH"
         # opencode merges config from eight sources and a repository's own `opencode.json`
         # outranks the OPENCODE_CONFIG path. Inline content outranks the checkout, which is
@@ -224,8 +244,15 @@ runs:
         STATUS: ${{ steps.run.outputs.exit-code }}
       run: |
         set -euo pipefail
-        if [ "${STATUS:-1}" != "0" ]; then
-          echo "::error title=opencode review failed::the run ended with exit ${STATUS:-unknown}; the report and artifact were still collected."
+        # An empty STATUS means the review step never ran at all, because an earlier step
+        # failed — a different fault from a review that ran and exited non-zero, and worth
+        # saying out loud rather than reporting as "exit unknown".
+        if [ -z "${STATUS:-}" ]; then
+          echo "::error title=opencode review did not run::an earlier step failed before the review started; the report and artifact were still collected."
+          exit 1
+        fi
+        if [ "$STATUS" != "0" ]; then
+          echo "::error title=opencode review failed::the run ended with exit $STATUS; the report and artifact were still collected."
           exit 1
         fi
         echo "opencode review completed."
