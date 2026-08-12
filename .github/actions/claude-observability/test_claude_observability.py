@@ -94,6 +94,62 @@ class ClassifierInputTest(unittest.TestCase):
         self.assertTrue(all(line.startswith("--") for line in args.splitlines()))
 
 
+class RegressionTest(unittest.TestCase):
+    """Two live failures from run 31587721049, locked in."""
+
+    def test_json_schema_is_single_quoted_for_the_shell_lexer(self) -> None:
+        """`claude_args` is shell-lexed; bare JSON reached the CLI mangled.
+
+        Live failure: `--json-schema is not valid JSON: JSON Parse error:
+        Expected '}'`. The action's own docs single-quote JSON args.
+        """
+        args = MODULE.classifier_claude_args(Path("/tmp/evidence"))
+        schema_line = next(line for line in args.splitlines() if line.startswith("--json-schema"))
+        payload = schema_line[len("--json-schema ") :]
+        self.assertTrue(payload.startswith("'"), f"schema must be single-quoted, got: {payload[:40]}")
+        self.assertTrue(payload.endswith("'"))
+        # And the quoted content must still be the real schema.
+        self.assertEqual(MODULE.CLASSIFICATION_SCHEMA, json.loads(payload[1:-1]))
+
+    def test_a_preserved_transcript_wins_over_the_fixed_runner_temp_path(self) -> None:
+        """The classifier overwrites the review's log at the shared fixed path.
+
+        Live failure: a review that cost $0.4220676 reported $0.000000, because
+        the post-hoc copy read the classifier's log. The copy preserved between
+        the two invocations must take precedence.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_dir = Path(directory)
+            # What the preserve step copied: the real review transcript.
+            (artifact_dir / "claude-execution.json").write_text(
+                json.dumps([{"type": "result", "total_cost_usd": 0.4220676, "is_error": True,
+                             "subtype": "error_max_turns"}]), encoding="utf-8")
+            # What now sits at the fixed path: the classifier's log, cost 0.01.
+            overwritten = artifact_dir / "claude-execution-output.json"
+            overwritten.write_text(json.dumps([{"type": "result", "total_cost_usd": 0.01}]), encoding="utf-8")
+
+            metadata_file = artifact_dir / "pr-metadata.json"
+            metadata_file.write_text(json.dumps(ReportTest.METADATA), encoding="utf-8")
+            environment = {
+                "GTO_CLAUDE_ARTIFACT_DIR": str(artifact_dir),
+                "GTO_CLAUDE_METADATA_FILE": str(metadata_file),
+                "GTO_CLAUDE_REVIEW_EXECUTION_FILE": str(overwritten),
+                "GTO_CLAUDE_REVIEW_CONCLUSION": "failure",
+                "HOME": str(artifact_dir / "home"),
+            }
+            with (
+                mock.patch.dict(MODULE.os.environ, environment, clear=False),
+                mock.patch.object(MODULE, "export_summary"),
+            ):
+                MODULE.report()
+            written = json.loads((artifact_dir / "claude-run-report.json").read_text(encoding="utf-8"))
+
+        # The failed review's real cost, not the classifier's.
+        self.assertEqual(0.4220676, written["total_cost_usd"])
+        self.assertEqual("error_max_turns", written["main"]["status"])
+        self.assertTrue(written["main"]["is_error"])
+
+
 class TimelineTest(unittest.TestCase):
     RESPONSES = {
         "commits": [{

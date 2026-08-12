@@ -237,6 +237,25 @@ runs:
         path_to_claude_code_executable: ${{ inputs.claude-executable }}
         github_token: ${{ inputs.github-token }}
 
+    # MUST run between the two invocations. claude-code-action writes its
+    # execution log to one fixed filename in RUNNER_TEMP, so the classifier pass
+    # overwrites the review's. Copying afterwards reads the classifier's log and
+    # reports it as the review's — a failed 12-turn review then shows $0.00.
+    - name: Preserve the review transcript before the classifier overwrites it
+      if: always()
+      shell: bash
+      env:
+        SOURCE: ${{ steps.review.outputs.execution_file }}
+        DESTINATION: ${{ steps.prepare.outputs.artifact-dir }}/claude-execution.json
+      run: |
+        set -euo pipefail
+        if [ -n "${SOURCE:-}" ] && [ -f "$SOURCE" ]; then
+          cp "$SOURCE" "$DESTINATION"
+          echo "Preserved the review transcript ($(wc -c < "$DESTINATION") bytes)."
+        else
+          echo "::warning title=No review transcript::the review produced no execution file; cost will read as zero"
+        fi
+
     # The portable classification pass: read-only, schema-constrained, over the
     # immutable diff plus the PR timeline. Separate from the review on purpose —
     # every repository gets the same labels regardless of what its reviewer says.
