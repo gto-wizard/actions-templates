@@ -1,0 +1,248 @@
+name: Claude execution with PR observability
+description: Run one Claude Code invocation, classify its PR, export OTel, and retain private JSONL evidence
+
+inputs:
+  prompt:
+    description: Prompt passed verbatim to `claude -p`.
+    required: true
+  model:
+    description: Model used by the caller's Claude invocation.
+    required: false
+    default: sonnet
+  max-turns:
+    description: Maximum turns for the caller's Claude invocation.
+    required: false
+    default: "60"
+  allowed-tools:
+    description: Value passed to Claude's --allowedTools flag.
+    required: false
+    default: ""
+  disallowed-tools:
+    description: Value passed to Claude's --disallowedTools flag.
+    required: false
+    default: ""
+  setting-sources:
+    description: Optional value passed to Claude's --setting-sources flag.
+    required: false
+    default: ""
+  strict-mcp-config:
+    description: Pass --strict-mcp-config to the caller's invocation.
+    required: false
+    default: "false"
+  disable-slash-commands:
+    description: Pass --disable-slash-commands to the caller's invocation.
+    required: false
+    default: "false"
+  session-mode:
+    description: Session behavior; one of fresh, create, or resume.
+    required: false
+    default: fresh
+  session-id:
+    description: UUID used when session-mode is create or resume.
+    required: false
+    default: ""
+  invocation:
+    description: Stable name for this invocation inside a workflow run, for example primary or retry.
+    required: true
+  pr-json:
+    description: Optional path to a GitHub PR JSON envelope. Values override the individual PR inputs.
+    required: false
+    default: ""
+  github-token:
+    description: >-
+      Token used to capture the pull request's timeline — commits, comments,
+      reviews, labels, force pushes, participants. Needs `pull-requests: read`.
+      Pass an empty string to skip timeline capture entirely.
+    required: false
+    default: ${{ github.token }}
+  diff-file:
+    description: Optional immutable PR diff. When omitted, base-sha...head-sha is captured before Claude runs.
+    required: false
+    default: ""
+  pr-number:
+    description: Pull-request number, used when pr-json is omitted.
+    required: false
+    default: ""
+  pr-title:
+    description: Pull-request title, used when pr-json is omitted.
+    required: false
+    default: ""
+  pr-url:
+    description: Pull-request URL, used when pr-json is omitted.
+    required: false
+    default: ""
+  pr-author:
+    description: Pull-request author, used when pr-json is omitted.
+    required: false
+    default: ""
+  head-ref:
+    description: Pull-request head ref, used when pr-json is omitted.
+    required: false
+    default: ""
+  base-sha:
+    description: Base revision used to capture a diff when diff-file is omitted.
+    required: false
+    default: ""
+  head-sha:
+    description: Head revision used to capture a diff when diff-file is omitted.
+    required: false
+    default: ""
+  api-key-alias:
+    description: Safe service-key alias attached to telemetry; never pass a credential here.
+    required: true
+  department:
+    description: Executive department attribution attached to telemetry.
+    required: true
+  team-id:
+    description: Budget-holder team identifier attached to telemetry.
+    required: true
+  code-areas:
+    description: Optional low-cardinality + separated code areas supplied by the consumer.
+    required: false
+    default: repository
+  claude-version:
+    description: Pinned Claude Code version.
+    required: false
+    default: 2.1.228
+  python-version:
+    description: >-
+      Python provisioned for this action's own scripts. ARC runners ship without
+      Python. Pass an empty string when the caller already guarantees python3.
+    required: false
+    default: "3.13"
+  classifier-model:
+    description: Small model used for the portable classification pass.
+    required: false
+    default: haiku
+  artifact-retention-days:
+    description: Retention for the private JSONL evidence artifact.
+    required: false
+    default: "14"
+  metrics-endpoint:
+    description: OTLP/HTTP metrics endpoint.
+    required: false
+    default: http://alloy-alloy-general.alloy.svc.cluster.local:4318/v1/metrics
+  traces-endpoint:
+    description: OTLP/HTTP traces endpoint.
+    required: false
+    default: http://alloy-alloy-general.alloy.svc.cluster.local:4318/v1/traces
+  logs-endpoint:
+    description: OTLP/HTTP logs endpoint.
+    required: false
+    default: https://loki.services.gtowiz.com/otlp/v1/logs
+
+outputs:
+  execution-file:
+    description: Path to the caller's full stream-json transcript.
+    value: ${{ steps.execute.outputs.execution-file }}
+  native-session-file:
+    description: Path to Claude's own session JSONL, or empty when it could not be located.
+    value: ${{ steps.execute.outputs.native-session-file }}
+  session-id:
+    description: Session id of the caller's Claude invocation.
+    value: ${{ steps.execute.outputs.session-id }}
+  classification-file:
+    description: Path to the validated portable classification JSON.
+    value: ${{ steps.execute.outputs.classification-file }}
+  report-file:
+    description: Path to the normalized invocation report.
+    value: ${{ steps.execute.outputs.report-file }}
+  change-type:
+    description: Classified change type, or `unclassified`.
+    value: ${{ steps.execute.outputs.change-type }}
+  complexity:
+    description: Classified implementation complexity, or `unclassified`.
+    value: ${{ steps.execute.outputs.complexity }}
+  risk:
+    description: Classified operational risk, or `unclassified`.
+    value: ${{ steps.execute.outputs.risk }}
+  classification-status:
+    description: Either success or failed; failed means the labels fell back to `unclassified`.
+    value: ${{ steps.execute.outputs.classification-status }}
+  total-cost-usd:
+    description: Exact reconciled cost of the wrapped invocation plus classification.
+    value: ${{ steps.execute.outputs.total-cost-usd }}
+  artifact-name:
+    description: Name of the uploaded private evidence artifact.
+    value: ${{ steps.prepare.outputs.artifact-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Provision Python for this action
+      if: inputs.python-version != ''
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # pin@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Prepare immutable PR metadata and trace context
+      id: prepare
+      shell: bash
+      env:
+        INPUT_INVOCATION: ${{ inputs.invocation }}
+        INPUT_PR_JSON: ${{ inputs.pr-json }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_DIFF_FILE: ${{ inputs.diff-file }}
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        INPUT_PR_TITLE: ${{ inputs.pr-title }}
+        INPUT_PR_URL: ${{ inputs.pr-url }}
+        INPUT_PR_AUTHOR: ${{ inputs.pr-author }}
+        INPUT_HEAD_REF: ${{ inputs.head-ref }}
+        INPUT_BASE_SHA: ${{ inputs.base-sha }}
+        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
+        INPUT_API_KEY_ALIAS: ${{ inputs.api-key-alias }}
+        INPUT_DEPARTMENT: ${{ inputs.department }}
+        INPUT_TEAM_ID: ${{ inputs.team-id }}
+        INPUT_CODE_AREAS: ${{ inputs.code-areas }}
+      run: python3 "${{ github.action_path }}/claude_observability.py" prepare
+
+    - name: Install Claude Code (pinned)
+      shell: bash
+      env:
+        CLAUDE_VERSION: ${{ inputs.claude-version }}
+      run: |
+        set -euo pipefail
+        # A caller that isolates HOME (recommended) may point it at a directory
+        # the installer would otherwise have to create itself.
+        mkdir -p "$HOME"
+        export PATH="$HOME/.local/bin:$PATH"
+        if command -v claude >/dev/null 2>&1 && claude --version 2>/dev/null | grep -qE "^${CLAUDE_VERSION//./\\.}( |$)"; then
+          echo "claude $(claude --version) already present."
+        else
+          curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_VERSION"
+        fi
+        "$HOME/.local/bin/claude" --version
+
+    - name: Run Claude, classify the PR, and export the normalized summary
+      id: execute
+      shell: bash
+      env:
+        INPUT_PROMPT: ${{ inputs.prompt }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_MAX_TURNS: ${{ inputs.max-turns }}
+        INPUT_ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
+        INPUT_DISALLOWED_TOOLS: ${{ inputs.disallowed-tools }}
+        INPUT_SETTING_SOURCES: ${{ inputs.setting-sources }}
+        INPUT_STRICT_MCP_CONFIG: ${{ inputs.strict-mcp-config }}
+        INPUT_DISABLE_SLASH_COMMANDS: ${{ inputs.disable-slash-commands }}
+        INPUT_SESSION_MODE: ${{ inputs.session-mode }}
+        INPUT_SESSION_ID: ${{ inputs.session-id }}
+        INPUT_CLASSIFIER_MODEL: ${{ inputs.classifier-model }}
+        GTO_CLAUDE_ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
+        GTO_CLAUDE_METADATA_FILE: ${{ steps.prepare.outputs.metadata-file }}
+        GTO_CLAUDE_RESOURCE_ATTRIBUTES: ${{ steps.prepare.outputs.resource-attributes }}
+        GTO_CLAUDE_TRACEPARENT: ${{ steps.prepare.outputs.traceparent }}
+        OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${{ inputs.metrics-endpoint }}
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ inputs.traces-endpoint }}
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
+      run: python3 "${{ github.action_path }}/claude_observability.py" run
+
+    - name: Upload private Claude execution evidence
+      if: always()
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4.6.2
+      with:
+        name: ${{ steps.prepare.outputs.artifact-name }}
+        path: ${{ steps.prepare.outputs.artifact-dir }}
+        retention-days: ${{ inputs.artifact-retention-days }}
+        if-no-files-found: warn

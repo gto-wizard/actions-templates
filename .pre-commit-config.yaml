@@ -15,3 +15,13 @@ repos:
     hooks:
       - id: yamllint
         args: ["--config-data={rules: {line-length: disable}}"]
+  - repo: local
+    hooks:
+      # Every workflow in this repo is workflow_call, so there is no CI job to
+      # hang tests on. Pre-commit is the only gate the repo has.
+      - id: claude-observability-tests
+        name: claude-observability unit tests
+        entry: python3 -m unittest discover -s .github/actions/claude-observability -t .github/actions/claude-observability
+        language: system
+        pass_filenames: false
+        files: ^\.github/actions/claude-observability/
