@@ -170,6 +170,50 @@ class AccountingTest(unittest.TestCase):
             self.assertEqual(len(MODULE.read_events(path)), len(complete))
 
 
+class ExitCodeWiringTest(unittest.TestCase):
+    """`report()` reads the run step's exit code from the environment, and an ABSENT one is
+    the cancellation signal -- a composite action cannot call `cancelled()`, so the killed
+    step's silence is what carries it."""
+
+    def _status_for(self, reported_exit_code: str) -> str:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_dir = Path(directory)
+            metadata_file = artifact_dir / "metadata.json"
+            metadata_file.write_text(json.dumps(METADATA), encoding="utf-8")
+            execution_file = artifact_dir / "events.jsonl"
+            execution_file.write_text(
+                "\n".join(json.dumps(event) for event in events(text=json.dumps(VALID_REVIEW))),
+                encoding="utf-8",
+            )
+            environment = {
+                "INPUT_ARTIFACT_DIR": str(artifact_dir),
+                "INPUT_METADATA_FILE": str(metadata_file),
+                "INPUT_EXECUTION_FILE": str(execution_file),
+                "INPUT_EXIT_CODE": reported_exit_code,
+                "INPUT_MODEL": "kimi-k3",
+                "INPUT_PROVIDER_ID": "gtowizard",
+                "INPUT_METRICS_ENDPOINT": "",
+                "INPUT_LOGS_ENDPOINT": "",
+                "INPUT_TRACES_ENDPOINT": "",
+                "GITHUB_OUTPUT": str(artifact_dir / "outputs"),
+                "GITHUB_STEP_SUMMARY": str(artifact_dir / "summary.md"),
+            }
+            with mock.patch.dict(MODULE.os.environ, environment, clear=False):
+                MODULE.report()
+            written = json.loads((artifact_dir / "opencode-run-report.json").read_text())
+            return written["session"]["status"]
+
+    def test_an_absent_exit_code_reads_as_cancelled_not_as_a_bad_model(self) -> None:
+        # Regression: this used to arrive as a defaulted `1`, so every re-push recorded
+        # four models as having failed to answer.
+        self.assertEqual("cancelled", self._status_for(""))
+
+    def test_a_reported_exit_code_is_honoured_verbatim(self) -> None:
+        for reported, expected in (("0", "success"), ("1", "error"), ("124", "timeout")):
+            with self.subTest(exit_code=reported):
+                self.assertEqual(expected, self._status_for(reported))
+
+
 class ReportTest(unittest.TestCase):
     def test_normalizes_a_successful_review(self) -> None:
         report = MODULE.build_report(

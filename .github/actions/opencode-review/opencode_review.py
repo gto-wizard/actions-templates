@@ -569,11 +569,18 @@ def run_status(*, exit_code: int, valid: bool, cancelled: bool) -> str:
     """Distinguish the model failing from the run being taken away from it.
 
     A cancelled run cannot be detected from the exit code: the review step is killed before it
-    writes one, so the report sees the default `1` and would otherwise record the model as
-    having failed. Since `concurrency: cancel-in-progress` means every re-push cancels the
-    previous panel, that would manufacture a fake "this model cannot answer" data point on
-    every push — corrupting exactly the comparison the telemetry exists for. Observed: four
-    reviewers cancelled mid-flight, all four recorded `verdict: unusable`.
+    writes one, so the report would see a default and record the model as having failed. Since
+    `concurrency: cancel-in-progress` means every re-push cancels the previous panel, that
+    would manufacture a fake "this model cannot answer" data point on every push — corrupting
+    exactly the comparison the telemetry exists for. Observed: four reviewers cancelled
+    mid-flight, all four recorded `verdict: unusable`.
+
+    `cancelled` is derived from the ABSENCE of an exit code rather than from a `cancelled()`
+    expression, which a composite action cannot evaluate — GitHub rejects the whole action
+    template with "Unrecognized function: 'cancelled'" and every review fails before its first
+    step. The run step disables errexit precisely so it always records an exit code on any
+    normal end, including a timeout; no exit code therefore means the step never reached its
+    last line, which is what being killed looks like.
     """
     if cancelled:
         return STATUS_CANCELLED
@@ -833,7 +840,9 @@ def report() -> int:
         raise ValueError(f"artifact directory does not exist: {artifact_dir}")
     metadata_path = Path(env("INPUT_METADATA_FILE"))
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
-    exit_code = int(env("INPUT_EXIT_CODE", "1") or "1")
+    # Empty means the run step never wrote one, i.e. it was killed rather than finished.
+    reported_exit_code = env("INPUT_EXIT_CODE")
+    exit_code = int(reported_exit_code or "1")
 
     execution = Path(env("INPUT_EXECUTION_FILE"))
     events = read_events(execution) if execution.is_file() else []
@@ -846,7 +855,7 @@ def report() -> int:
         model=env("INPUT_MODEL") or DEFAULT_MODEL,
         provider=env("INPUT_PROVIDER_ID") or DEFAULT_PROVIDER_ID,
         exit_code=exit_code,
-        cancelled=env("INPUT_CANCELLED").lower() == "true",
+        cancelled=reported_exit_code == "",
     )
     report_file = artifact_dir / "opencode-run-report.json"
     report_file.write_text(json.dumps(built, indent=2, sort_keys=True) + "\n", encoding="utf-8")
