@@ -536,14 +536,60 @@ def read_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+# Why a run ended, as a dimension. Not a free-text field: this is what a dashboard groups by,
+# and it is the difference between "this model cannot hold the format" and "somebody pushed
+# again while it was thinking".
+STATUS_SUCCESS = "success"
+# "the model answered, but not in the shape asked for" is a fact about the model. "opencode
+# exited non-zero" is a fact about the run. Collapsing them into one word throws away the
+# distinction a model comparison is built on.
+STATUS_UNUSABLE = "unusable"
+STATUS_ERROR = "error"
+STATUS_TIMEOUT = "timeout"
+STATUS_CANCELLED = "cancelled"
+
+TIMEOUT_EXIT_CODE = 124  # `timeout` says so
+
+
+def run_status(*, exit_code: int, valid: bool, cancelled: bool) -> str:
+    """Distinguish the model failing from the run being taken away from it.
+
+    A cancelled run cannot be detected from the exit code: the review step is killed before it
+    writes one, so the report sees the default `1` and would otherwise record the model as
+    having failed. Since `concurrency: cancel-in-progress` means every re-push cancels the
+    previous panel, that would manufacture a fake "this model cannot answer" data point on
+    every push — corrupting exactly the comparison the telemetry exists for. Observed: four
+    reviewers cancelled mid-flight, all four recorded `verdict: unusable`.
+    """
+    if cancelled:
+        return STATUS_CANCELLED
+    if exit_code == TIMEOUT_EXIT_CODE:
+        return STATUS_TIMEOUT
+    if exit_code != 0:
+        return STATUS_ERROR
+    return STATUS_SUCCESS if valid else STATUS_UNUSABLE
+
+
 def build_report(
-    metadata: dict[str, Any], events: list[dict[str, Any]], *, model: str, provider: str, exit_code: int
+    metadata: dict[str, Any],
+    events: list[dict[str, Any]],
+    *,
+    model: str,
+    provider: str,
+    exit_code: int,
+    cancelled: bool = False,
 ) -> dict[str, Any]:
     """One opencode run, normalized into a report a human or an ingest can read."""
     text = review_text(events)
     review = extract_review(text)
-    problems = validate_review(review) if review is not None else ["no JSON review object in the answer"]
-    valid = review is not None and not problems
+    if cancelled:
+        problems = ["the run was cancelled before the model finished answering"]
+    elif review is None:
+        problems = ["no JSON review object in the answer"]
+    else:
+        problems = validate_review(review)
+    valid = not cancelled and review is not None and not problems
+    status = run_status(exit_code=exit_code, valid=valid, cancelled=cancelled)
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at": datetime.now(UTC).isoformat(),
@@ -552,18 +598,18 @@ def build_report(
         "metadata": metadata,
         "session": {
             "id": session_id(events),
-            "status": "success" if exit_code == 0 and valid else "error",
-            "is_error": exit_code != 0 or not valid,
+            "status": status,
+            "is_error": status != STATUS_SUCCESS,
             "exit_code": exit_code,
             # No `cost_usd`, deliberately — see the module docstring. Its absence is the claim.
             "tokens": token_usage(events),
             "tools": tool_names(events),
             "finish_reasons": finish_reasons(events),
-            "review": review if valid else None,
+            "review": review if status == STATUS_SUCCESS else None,
             "review_problems": problems,
             # The raw answer is kept only when it did not parse — exactly when somebody has
             # to read it. A valid review is already in `review`.
-            "raw_answer": None if valid else text,
+            "raw_answer": None if status == STATUS_SUCCESS else text,
         },
         "artifact": {"format": "jsonl", "event_count": len(events)},
     }
@@ -665,7 +711,9 @@ def telemetry_attributes(report: dict[str, Any]) -> dict[str, object]:
         "vcs.ref.base.revision": metadata.get("base_sha", ""),
         "vcs.change.files": metadata.get("changed_files") or 0,
         "gto.review.runner": "opencode",
-        "gto.review.verdict": review.get("verdict") or "unusable",
+        # Falls back to the run's status, not to "unusable": a cancelled or timed-out run
+        # never got to answer, and recording that as a model verdict is a lie in a dashboard.
+        "gto.review.verdict": review.get("verdict") or session["status"],
         "gto.review.findings": len(review.get("findings") or []),
         "gto.review.steps": len(session.get("finish_reasons") or []),
         "gto.review.tool_calls": len(session.get("tools") or []),
@@ -798,6 +846,7 @@ def report() -> int:
         model=env("INPUT_MODEL") or DEFAULT_MODEL,
         provider=env("INPUT_PROVIDER_ID") or DEFAULT_PROVIDER_ID,
         exit_code=exit_code,
+        cancelled=env("INPUT_CANCELLED").lower() == "true",
     )
     report_file = artifact_dir / "opencode-run-report.json"
     report_file.write_text(json.dumps(built, indent=2, sort_keys=True) + "\n", encoding="utf-8")
