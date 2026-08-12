@@ -126,6 +126,11 @@ classified as `safe`.
     team-id: <litellm-team-id>
 ```
 
+`model` and `classifier-model` default to the Anthropic-direct aliases `sonnet`
+and `haiku`. Callers routing through the LiteLLM gateway must pass the names that
+gateway exposes (`claude-sonnet-5`, `claude-haiku-4.5`, `claude-opus-5`) — the
+short aliases do not resolve there.
+
 Caller requirements:
 
 - `actions/checkout` with `fetch-depth: 0`, so `base...head` can be diffed
