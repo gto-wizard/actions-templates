@@ -771,7 +771,13 @@ def build_summary_payloads(
             "scopeMetrics": [{
                 "scope": scope,
                 "metrics": review_metrics(
-                    attrs, observed_at_unix_nano=observed_at_unix_nano, cost_usd=cost
+                    attrs,
+                    observed_at_unix_nano=observed_at_unix_nano,
+                    cost_usd=cost,
+                    duration_seconds=max(
+                        observed_at_unix_nano - int(metadata["started_at_unix_nano"]), 0
+                    )
+                    / 1_000_000_000,
                 ),
             }],
         }]

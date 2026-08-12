@@ -506,7 +506,10 @@ class SummaryPayloadTest(unittest.TestCase):
 
         # Runner-neutral names shared with the opencode action, and a `runs` series that
         # exists whether or not the runner could price itself.
-        self.assertEqual({"gto.ai.review.runs", "gto.ai.review.cost_usd"}, set(by_name))
+        self.assertEqual(
+            {"gto.ai.review.runs", "gto.ai.review.cost_usd", "gto.ai.review.duration_seconds"},
+            set(by_name),
+        )
         self.assertEqual("claude", labels["gto.review.runner"])
         self.assertEqual(0.5, metric["gauge"]["dataPoints"][0]["asDouble"])
         self.assertEqual("hard", labels["gto.review.complexity"])

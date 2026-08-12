@@ -494,7 +494,12 @@ class TelemetryTest(unittest.TestCase):
         # counting reviews never needs to union two metric families again.
         self.assertEqual(
             names,
-            {"gto.ai.review.runs", "gto.ai.review.tokens", "gto.ai.review.findings"},
+            {
+                "gto.ai.review.runs",
+                "gto.ai.review.tokens",
+                "gto.ai.review.findings",
+                "gto.ai.review.duration_seconds",
+            },
         )
         kinds = {
             attribute["value"]["stringValue"]

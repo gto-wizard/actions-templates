@@ -775,6 +775,7 @@ def emit_telemetry(report: dict[str, Any], *, observed_at_unix_nano: int, durati
         observed_at_unix_nano=observed_at_unix_nano,
         tokens={kind: tokens[kind] for kind in ("input", "output", "reasoning", "cache_read")},
         findings=int(attributes["gto.review.findings"]),
+        duration_seconds=duration_nanos / 1_000_000_000,
     )
 
     event_attributes = {
