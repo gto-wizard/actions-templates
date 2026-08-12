@@ -682,7 +682,10 @@ def classifier_claude_args(artifact_dir: Path) -> str:
         "--setting-sources user",
         "--strict-mcp-config",
         "--disable-slash-commands",
-        f"--json-schema {json.dumps(CLASSIFICATION_SCHEMA, separators=(',', ':'))}",
+        # Single-quoted: `claude_args` is shell-lexed, so bare JSON loses its
+        # quoting and reaches the CLI as invalid JSON. This is the form the
+        # action's own docs use for --mcp-config.
+        f"--json-schema '{json.dumps(CLASSIFICATION_SCHEMA, separators=(',', ':'))}'",
     ])
 
 
@@ -887,11 +890,21 @@ def report() -> int:
     review_events: list[dict[str, Any]] = []
     review_file = artifact_dir / "claude-execution.json"
     source = env("GTO_CLAUDE_REVIEW_EXECUTION_FILE")
-    if source and Path(source).is_file():
+    if review_file.is_file():
+        # Copied by the preserve step, which runs BEFORE the classifier. Both
+        # invocations write the same fixed RUNNER_TEMP filename, so by the time
+        # this function runs the original path holds the classifier's log — a
+        # copy made here would silently report the wrong run's cost.
+        review_events = read_events(review_file)
+    elif source and Path(source).is_file():
         shutil.copyfile(source, review_file)
         review_events = read_events(review_file)
-    else:
-        print("::warning title=Claude execution log missing::the review produced no execution file", flush=True)
+    if not review_events:
+        print(
+            "::warning title=Claude execution log missing::no review transcript to reconcile; "
+            "cost and model usage will read as zero",
+            flush=True,
+        )
     review_result = result_event(review_events)
 
     review_session = copy_native_session(
