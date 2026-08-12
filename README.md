@@ -163,6 +163,11 @@ attempts per PR while still summing cost.
 Outputs include `change-type`, `complexity`, `risk`, `classification-status`,
 `total-cost-usd`, `session-id`, and paths to every evidence file.
 
+Every signal carries **`vcs.change.ref`** — `gto-brain#182` — alongside the bare
+`vcs.change.number`. Filter dashboards on the qualified one: a `pr=182` variable
+silently merges `gto-brain#182` with `gto-universe#182` and presents the sum as one
+pull request's cost, which is a wrong number rather than a missing one.
+
 ### `opencode-review`
 
 The sibling of `claude-observability`, for every model that is **not** Claude. It

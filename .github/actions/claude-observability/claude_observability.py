@@ -104,6 +104,18 @@ def safe_slug(value: str) -> str:
     return slug[:100] or "unknown"
 
 
+def change_ref(repository: str, number: object) -> str:
+    """``gto-brain#182`` — a pull-request identifier that survives being put in a dropdown.
+
+    `vcs.change.number` alone is ambiguous the moment a second repository runs a review, and
+    that is the dimension a dashboard filters on: `pr=182` silently mixes gto-brain#182 with
+    gto-universe#182 and reports the sum as one pull request's cost. The repository is already
+    its own attribute, so this exists purely to be *selectable* — short name, because a
+    dropdown of `gto-wizard/gto-brain#182` is mostly the same nine characters over and over.
+    """
+    return f"{repository.split('/')[-1] or repository}#{number}"
+
+
 def json_object(path: str) -> dict[str, Any]:
     if not path:
         return {}
@@ -394,6 +406,8 @@ def prepare() -> int:
         "github.run.attempt": run_attempt,
         "github.actor": metadata["github"]["actor"],
         "vcs.change.number": number,
+        # Qualified, because `number` alone collides across repositories — see `change_ref`.
+        "vcs.change.ref": change_ref(repository, number),
         "vcs.change.title": metadata["pull_request"]["title"],
         "vcs.change.url": metadata["pull_request"]["url"],
         "vcs.change.author": metadata["pull_request"]["author"],
@@ -729,6 +743,7 @@ def build_summary_payloads(
         "github.run.attempt": metadata["github"]["run_attempt"],
         "gto.review.invocation": metadata["github"]["invocation"],
         "vcs.change.number": metadata["pull_request"]["number"],
+        "vcs.change.ref": change_ref(metadata["github"]["repository"], metadata["pull_request"]["number"]),
         "vcs.change.title": metadata["pull_request"]["title"],
         "vcs.change.url": metadata["pull_request"]["url"],
         "vcs.change.author": metadata["pull_request"]["author"],
