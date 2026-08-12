@@ -262,6 +262,10 @@ runs:
         OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
         OTEL_RESOURCE_ATTRIBUTES: ${{ steps.prepare.outputs.resource-attributes }}
         TRACEPARENT: ${{ steps.prepare.outputs.traceparent }}
+        # Tags this run's gateway spend so it can be attributed to the review instead of
+        # pooling into one anonymous `User-Agent: claude-cli` bucket. Ignored by the
+        # Anthropic API directly; only the LiteLLM gateway reads it.
+        ANTHROPIC_CUSTOM_HEADERS: "x-litellm-tags: ${{ steps.prepare.outputs.litellm-tags }}"
       with:
         prompt: ${{ inputs.prompt }}
         claude_args: ${{ steps.prepare.outputs.review-claude-args }}
@@ -323,6 +327,7 @@ runs:
         OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
         OTEL_RESOURCE_ATTRIBUTES: ${{ steps.prepare.outputs.classifier-resource-attributes }}
         TRACEPARENT: ${{ steps.prepare.outputs.traceparent }}
+        ANTHROPIC_CUSTOM_HEADERS: "x-litellm-tags: ${{ steps.prepare.outputs.litellm-tags }}"
       with:
         prompt: ${{ steps.prepare.outputs.classifier-prompt }}
         claude_args: ${{ steps.prepare.outputs.classifier-claude-args }}

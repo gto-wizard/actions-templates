@@ -251,16 +251,29 @@ Evidence artifact (14 days): `pr-metadata.json`, `pr.diff.patch`,
 Outputs: `verdict`, `findings`, `status`, `session-id`, `tokens-input`,
 `tokens-output`, `report-file`, `artifact-name`.
 
-**Telemetry.** Each run emits `gto_opencode_pr_review_tokens` (one metric, `kind` =
-input/output/reasoning/cache_read) and `gto_opencode_pr_review_findings` to Mimir, a
-`gto.opencode.pr_review.completed` event to Loki, and a `gto.opencode.pr_review` root
-span to Tempo — dimensioned exactly like `claude-observability`'s signals, plus
-`gto.review.runner="opencode"`, so **one dashboard can compare both runners**. There is
-no cost metric: opencode reports `cost: 0` for a custom provider, and the gateway's
-spend log for `api-key-alias` is the source of truth. Every signal carries
-`vcs.change.ref` (`gto-brain#182`) — filter on that, never on the bare number, which
-collides across repositories. Any endpoint set to an empty string skips that signal,
-and an unreachable collector warns without changing the review's verdict.
+**Telemetry.** Every reviewer — this one and `claude-observability` — emits the *same*
+metric names, built by `shared/gto_otlp.py`. The runner is a label, never part of a name:
+
+| metric | emitted when | notes |
+| --- | --- | --- |
+| `gto_ai_review_runs` | always | the series to count. A review that could report nothing else still ran. |
+| `gto_ai_review_cost_usd` | the runner knows its price | Claude today. Absent, never zero — a zero reads as free. |
+| `gto_ai_review_tokens` | the runner reports tokens | `kind` = input/output/reasoning/cache_read. |
+| `gto_ai_review_findings` | the runner reports findings | opencode today. |
+
+Plus a `gto.opencode.pr_review.completed` event to Loki and a `gto.opencode.pr_review`
+root span to Tempo. The shared dimensions come from `review_attributes()` so they cannot
+drift between runners — they previously did, and `vcs.change.ref` reached one reviewer
+and not the other, silently dropping every Claude run from any per-PR filter.
+
+opencode still has no cost of its own: it reports `cost: 0` for a custom provider, and
+its token counts are per-message rather than per-session, so deriving dollars from them
+reconciles ~4x low. Instead every request carries
+`x-litellm-tags: gto-ai-review,runner:…,model:…,run:<github run id>`, so the gateway's
+own spend log can be split per review and joined back to `gto_ai_review_runs` on
+`github_run_id`. Filter on `vcs.change.ref` (`gto-brain#182`), never the bare number,
+which collides across repositories. Any endpoint set to an empty string skips that
+signal, and an unreachable collector warns without changing the review's verdict.
 
 `review.status` is one of **`success`**, **`unusable`** (the model answered in the
 wrong shape — its fault), **`error`** (opencode exited non-zero), **`timeout`**, or

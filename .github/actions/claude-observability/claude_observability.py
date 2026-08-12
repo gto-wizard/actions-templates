@@ -35,9 +35,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
 
 from gto_otlp import (  # noqa: E402 - sys.path must be set before this import
     change_ref,
+    litellm_tags,
     otel_attributes,
     post_json,
     resource_attribute_env,
+    review_attributes,
+    review_metrics,
 )
 
 SCHEMA_VERSION = 1
@@ -372,6 +375,9 @@ def prepare() -> int:
             "head_ref": str(pr.get("headRefName") or env("INPUT_HEAD_REF")),
             "head_sha": str(pr.get("headRefOid") or env("INPUT_HEAD_SHA")),
             "base_sha": str(pr.get("baseRefOid") or env("INPUT_BASE_SHA")),
+            # Present only when the caller's `gh pr view --json` asked for it. Zero rather
+            # than absent, so the label exists on both runners either way.
+            "changed_files": pr.get("changedFiles") or 0,
         },
         "attribution": {
             "api_key_alias": env("INPUT_API_KEY_ALIAS"),
@@ -423,6 +429,10 @@ def prepare() -> int:
     append_output("metadata-file", str(metadata_file))
     append_output("resource-attributes", resource_attributes)
     append_output("traceparent", metadata["trace"]["traceparent"])
+    # Carried to the gateway as `x-litellm-tags`, so its spend log can be split by review
+    # rather than pooling every invocation into one `User-Agent: claude-cli` bucket. The
+    # model is not known until the run finishes, so the tag names the runner and the run.
+    append_output("litellm-tags", litellm_tags(runner="claude", model="claude", run_id=run_id))
 
     # Everything the two claude-code-action invocations need, computed once here
     # so the composite steps stay declarative and the CLI contract has a single
@@ -707,16 +717,34 @@ def build_summary_payloads(
     main = report["main"]
     concerns = classification.get("concerns") or []
     models = "+".join(sorted(report["model_usage"])) or "unknown"
+    pull_request = metadata["pull_request"]
     attrs: dict[str, object] = {
-        "github.repository": metadata["github"]["repository"],
-        "github.run.id": metadata["github"]["run_id"],
-        "github.run.attempt": metadata["github"]["run_attempt"],
+        # The shared set, identical to the opencode reviewer's by construction rather than
+        # by inspection — see `review_attributes`.
+        **review_attributes(
+            runner="claude",
+            model=models,
+            repository=metadata["github"]["repository"],
+            change_number=pull_request["number"],
+            status=main["status"],
+            success=not main["is_error"],
+            change_title=pull_request["title"],
+            change_url=pull_request["url"],
+            change_author=pull_request["author"],
+            changed_files=pull_request.get("changed_files") or 0,
+            head_ref=pull_request.get("head_ref", ""),
+            head_revision=pull_request.get("head_sha", ""),
+            base_revision=pull_request.get("base_sha", ""),
+            run_id=metadata["github"]["run_id"],
+            run_attempt=metadata["github"]["run_attempt"],
+            actor=metadata["github"].get("actor", ""),
+            api_key_alias=metadata["attribution"]["api_key_alias"],
+            code_areas=metadata["attribution"]["code_areas"],
+            department=metadata["attribution"]["department"],
+            team_id=metadata["attribution"]["team_id"],
+        ),
+        # Facts only this runner produces: it is the only reviewer that classifies.
         "gto.review.invocation": metadata["github"]["invocation"],
-        "vcs.change.number": metadata["pull_request"]["number"],
-        "vcs.change.ref": change_ref(metadata["github"]["repository"], metadata["pull_request"]["number"]),
-        "vcs.change.title": metadata["pull_request"]["title"],
-        "vcs.change.url": metadata["pull_request"]["url"],
-        "vcs.change.author": metadata["pull_request"]["author"],
         "gto.review.change_type": classification["change_type"],
         "gto.review.domain": classification["domain"],
         "gto.review.concerns": "+".join(concerns) or "none",
@@ -724,13 +752,6 @@ def build_summary_payloads(
         "gto.review.concern.documentation": "documentation" in concerns,
         "gto.review.complexity": classification["complexity"],
         "gto.review.risk": classification["risk"],
-        "gto.code.areas": metadata["attribution"]["code_areas"],
-        "gto.api_key.alias": metadata["attribution"]["api_key_alias"],
-        "department": metadata["attribution"]["department"],
-        "team.id": metadata["attribution"]["team_id"],
-        "model": models,
-        "review.status": main["status"],
-        "review.success": not main["is_error"],
         "classification.status": report["classification_status"],
     }
     resource_attrs = {
@@ -749,15 +770,9 @@ def build_summary_payloads(
             "resource": resource,
             "scopeMetrics": [{
                 "scope": scope,
-                "metrics": [{
-                    "name": "gto.claude.pr_review.cost_usd",
-                    "description": "Exact total cost of one wrapped Claude PR invocation, including classification",
-                    "gauge": {"dataPoints": [{
-                        "attributes": otel_attributes(attrs),
-                        "timeUnixNano": timestamp,
-                        "asDouble": cost,
-                    }]},
-                }],
+                "metrics": review_metrics(
+                    attrs, observed_at_unix_nano=observed_at_unix_nano, cost_usd=cost
+                ),
             }],
         }]
     }

@@ -302,6 +302,16 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(list(provider["models"]), ["kimi-k2.6"])
         self.assertEqual(config["model"], "gtowizard/kimi-k2.6")
 
+    def test_tags_every_request_so_gateway_spend_is_attributable(self) -> None:
+        # Without this the run's dollars pool into one `User-Agent: opencode` bucket that
+        # cannot be split by pull request, model or run -- measured at $10.96 unattributed.
+        config = MODULE.review_config("kimi-k3", provider_id="gtowizard", run_id="31633374870")
+        headers = config["provider"]["gtowizard"]["options"]["headers"]
+        self.assertEqual(
+            "gto-ai-review,runner:opencode,model:gtowizard/kimi-k3,run:31633374870",
+            headers["x-litellm-tags"],
+        )
+
     def test_denies_by_default_everywhere_it_matters(self) -> None:
         config = MODULE.review_config("kimi-k3")
         for where in ("top", "agent"):
@@ -354,10 +364,7 @@ class TelemetryTest(unittest.TestCase):
         # The whole point: `181` alone would merge two repositories in one dashboard filter.
         self.assertEqual(attributes["vcs.change.ref"], "gto-brain#181")
         self.assertEqual(attributes["vcs.change.number"], 181)
-        self.assertNotEqual(
-            attributes["vcs.change.ref"],
-            MODULE.change_ref("gto-wizard/gto-universe", 181),
-        )
+        self.assertNotEqual("gto-universe#181", attributes["vcs.change.ref"])
 
     def test_dimensions_match_the_claude_action_so_runners_are_comparable(self) -> None:
         attributes = MODULE.telemetry_attributes(self._report())
@@ -439,11 +446,16 @@ class TelemetryTest(unittest.TestCase):
             )
         metrics = posted[0]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
         names = {m["name"] for m in metrics}
-        self.assertEqual(names, {"gto_opencode_pr_review_tokens", "gto_opencode_pr_review_findings"})
+        # Runner-neutral names, shared with the Claude action: the runner is a label, so
+        # counting reviews never needs to union two metric families again.
+        self.assertEqual(
+            names,
+            {"gto.ai.review.runs", "gto.ai.review.tokens", "gto.ai.review.findings"},
+        )
         kinds = {
             attribute["value"]["stringValue"]
             for m in metrics
-            if m["name"].endswith("_tokens")
+            if m["name"] == "gto.ai.review.tokens"
             for point in m["gauge"]["dataPoints"]
             for attribute in point["attributes"]
             if attribute["key"] == "kind"
