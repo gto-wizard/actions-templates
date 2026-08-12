@@ -18,6 +18,9 @@ Shared GitHub Actions reusable workflows and composite actions used across all G
 - `.github/actions/` — Composite actions
   - `argocd-sync-wait/` — ArgoCD sync + health wait (shell-based composite action)
   - `slack-release-payload-builder/` — Builds Slack Block Kit payloads (Python script)
+  - `setup-warp/` — Cloudflare WARP in proxy mode for reaching internal services
+  - `claude-observability/` — Wraps one Claude Code call: OTel, PR timeline capture,
+    portable change/complexity/risk classification, JSONL evidence (Python + unit tests)
 
 ## Linting and Validation
 
@@ -32,7 +35,14 @@ Hooks that run:
 - **yamllint** — lints YAML (120 char lines, 2-space indent, comments/truthy checks disabled)
 - **end-of-file-fixer** and **trailing-whitespace**
 
-There are no tests or build steps — this is a YAML-only repo (plus one Python script in `slack-release-payload-builder`).
+There is no build step. Most of the repo is YAML; the two Python actions are stdlib-only
+so a runner can execute them before any dependency install. `claude-observability` carries
+unit tests — run them directly, they need nothing installed:
+
+```bash
+ACTION=.github/actions/claude-observability
+python3 -m unittest discover -s "$ACTION" -t "$ACTION"
+```
 
 ## Key Conventions
 
