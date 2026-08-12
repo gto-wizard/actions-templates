@@ -42,6 +42,14 @@ on:
         type: number
         default: 300
         description: Timeout in seconds for ArgoCD sync wait
+      ARGOCD_PRUNE:
+        type: boolean
+        default: false
+        description: >-
+          Sync with --prune, deleting resources removed from git. Leave false unless the
+          app's orphans would otherwise pin it OutOfSync and fail the wait (OPS-1010).
+          Intended as a one-shot: flip it true, let one deploy clear the orphan, then flip
+          it back — leaving it on makes every future deploy delete whatever left git.
 
 jobs:
   deploy:
@@ -97,3 +105,4 @@ jobs:
             "${{ inputs.ARGOCD_APP_NAME != '' && inputs.ARGOCD_APP_NAME || format('{0}-{1}', inputs.APP_NAME, inputs.APP_ENVIRONMENT) }}"
           ARGOCD_AUTH_TOKEN: "${{ secrets.ARGOCD_AUTH_TOKEN }}"
           WAIT_TIMEOUT_SECONDS: ${{ inputs.ARGOCD_WAIT_TIMEOUT_SECONDS }}
+          PRUNE: ${{ inputs.ARGOCD_PRUNE }}
