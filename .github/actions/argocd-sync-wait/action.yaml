@@ -21,12 +21,18 @@ inputs:
     type: number
     default: 300
     description: Timeout in seconds for argocd wait.
+  # No `type:` here on purpose: composite-action inputs honor only description /
+  # required / default / deprecationMessage, so a `type: boolean` would be
+  # decorative and would imply a coercion GitHub never performs. The value always
+  # arrives as a string, which is what the sync step compares against.
   PRUNE:
-    type: boolean
-    default: false
+    default: "false"
     description: >-
       Pass --prune to `argocd app sync`, so resources dropped from git are deleted
-      instead of left behind. Opt-in per caller; see the DEADLOCK note on the sync step.
+      instead of left behind. Intended as a one-shot: set it true, run one deploy to
+      clear the orphan, then set it back to false rather than leaving CI-driven
+      deletion permanently on. Only the exact string "true" enables it — see the
+      DEADLOCK note on the sync step.
   ARGOCD_AUTH_TOKEN:
     required: true
     description: Argocd cli user auth token.
@@ -80,11 +86,23 @@ runs:
         # automatic deletion of anything removed from git, which is exactly what the
         # repo-wide `prune: false` convention exists to prevent. Callers that would
         # rather have CI prune than page a human set PRUNE: true.
+        # Matched STRICTLY against "true", never case-normalized. On a flag that
+        # deletes live resources, an unrecognized value must fail CLOSED — the cost
+        # of ignoring `True` is a red gate you go and look at, whereas the cost of
+        # honoring a value the caller didn't mean is deleted resources. The warning
+        # below keeps that from being a *silent* no-op, which is the only real
+        # hazard of the strict match.
         prune_args=()
-        if [ "$PRUNE" = "true" ]; then
-          prune_args+=(--prune)
-          echo "🧹 Prune enabled — resources no longer in git will be DELETED by this sync."
-        fi
+        case "$PRUNE" in
+          true)
+            prune_args+=(--prune)
+            echo "🧹 Prune enabled — resources no longer in git will be DELETED by this sync."
+            ;;
+          false | "") ;;
+          *)
+            echo "⚠️ PRUNE='$PRUNE' is not a recognized value — treating it as false and NOT pruning. Pass the exact lowercase string 'true' to enable pruning."
+            ;;
+        esac
 
         for app in "${apps[@]}"; do
           echo "🔄 Syncing app: $app"
