@@ -17,16 +17,38 @@ which is true of any task these runners perform.
 
 WHAT IT EMITS, and why it is a separate name:
 
-    gto.ai.agent.gateway_cost_usd{github_run_id, model, gto_review_runner}
+    gto.ai.agent.gateway_cost_usd{github_run_id, model, gto_model_provider_id, gto_review_runner}
+
+`model` is the RUNNER's own name for the model -- the same string `gto.ai.agent.runs` reports
+-- so the two are one dimension and a dashboard can join on it directly. The gateway's own id
+for what it billed rides along as `gto_model_provider_id`, because they genuinely differ
+(`gtowizard/kimi-k3` is billed as `moonshotai/kimi-k3`) and both are worth having. Emitting only
+the gateway's id, as this did first, split every "by model" panel into two namespaces that
+looked like one: the cost column of any table keyed on the runner's name silently came back
+empty.
 
 It deliberately does NOT re-emit the reviewers' own label set. This module knows what a run
 cost; it does not know what the run was for, and inventing those labels here would give
-two owners to the same facts. A dashboard joins on `github_run_id`:
+two owners to the same facts. A dashboard joins on run and model, which is unique on both
+sides -- a Claude run bills the reviewer and the classifier separately:
 
     sum by (vcs_change_ref) (
       gto_ai_agent_gateway_cost_usd
-        * on (github_run_id) group_left(vcs_change_ref) gto_ai_agent_runs
+        * on (github_run_id, model) group_left(vcs_change_ref) gto_ai_agent_runs
     )
+
+WHY THE COST IS STAMPED AT EXPORT TIME, NOT RUN TIME:
+
+Attributing each run's cost to when the run happened would make "spend over time" a curve
+rather than a spike at each export. It is not possible: Mimir's out-of-order window on this
+tenant is 5 minutes, and a back-dated sample is refused outright --
+
+    the sample has been rejected because another sample with a more recent timestamp has
+    already been ingested and this sample is beyond the out-of-order time window of 5m
+    (err-mimir-sample-out-of-order)
+
+-- so spend necessarily appears at the next export after the run, and the schedule is what
+bounds that lag. Do not re-attempt without first widening the window server-side.
 
 CREDENTIAL: a LiteLLM `proxy_admin_viewer` key. Verified: it reads /spend/logs/ui and
 /spend/tags, and is refused (403) when it tries to mint a key. The master key must never
@@ -61,6 +83,7 @@ MAX_PAGES = 50
 # LiteLLM stores one row per distinct tag; these are the ones this exporter reads back.
 RUN_TAG = "run:"
 RUNNER_TAG = "runner:"
+MODEL_TAG = "model:"
 REVIEW_TAG = "gto-ai-review"
 
 
@@ -101,20 +124,38 @@ def spend_rows(base_url: str, api_key: str, *, since_hours: int) -> list[dict]:
     return rows
 
 
-def coverage_gap(rows: list[dict]) -> tuple[int, float]:
-    """Review traffic that lost its run id: rows tagged `gto-ai-review` but not `run:`.
+def tags_of(row: dict) -> list[str]:
+    tags = row.get("request_tags") or []
+    return [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else []
 
-    This is the failure mode that would otherwise be invisible. A request whose header
-    did not survive is not misattributed -- it is simply absent, so the cost silently
-    reads low and every panel still looks plausible. Counting it here turns a silent
-    under-count into a warning.
+
+def key_alias(row: dict) -> str:
+    """Which API key paid for this request."""
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("user_api_key_alias"):
+        return str(metadata["user_api_key_alias"])
+    return str(row.get("user") or "")
+
+
+def coverage_gap(rows: list[dict]) -> tuple[int, float]:
+    """Spend on a CI key that no run will ever claim.
+
+    This is the failure mode that would otherwise be invisible. A request whose header did
+    not survive is not misattributed -- it is simply absent, so the cost silently reads low
+    and every panel still looks plausible.
+
+    Looking for rows tagged `gto-ai-review` but missing `run:` does not find it, because
+    both tags come from the same header: when it is absent, so are both, and the row is
+    indistinguishable from someone's laptop. What separates them is the KEY -- a CI key is
+    used by nothing else -- so the CI keys are learned from the rows that did carry a run id
+    rather than hardcoded, and anything else billed to those keys is the gap. Measured at
+    $4.83 over three days when this was written, against $24.35 attributed.
     """
+    ci_keys = {key_alias(row) for row in rows if any(t.startswith(RUN_TAG) for t in tags_of(row))}
+    ci_keys.discard("")
     missing, spend = 0, 0.0
     for row in rows:
-        tags = row.get("request_tags") or []
-        if not isinstance(tags, list) or REVIEW_TAG not in tags:
-            continue
-        if any(isinstance(t, str) and t.startswith(RUN_TAG) for t in tags):
+        if key_alias(row) not in ci_keys or any(t.startswith(RUN_TAG) for t in tags_of(row)):
             continue
         missing += 1
         with contextlib.suppress(TypeError, ValueError):
@@ -122,46 +163,65 @@ def coverage_gap(rows: list[dict]) -> tuple[int, float]:
     return missing, spend
 
 
-def by_run_and_model(rows: list[dict]) -> dict[tuple[str, str, str], float]:
-    """Sum spend per (run, model, runner), keeping only tagged review traffic.
+def model_alias(row: dict, tags: list[str], runner: str) -> str:
+    """The runner's own name for the model, so this joins to `gto.ai.agent.runs` on `model`.
+
+    Two sources, because one runner can name it per-request and the other cannot:
+
+      opencode  sends one header per review, so `model:gtowizard/kimi-k3` IS the alias.
+      claude    sends one header for the whole process, and that process calls two models
+                (the reviewer and the classifier). Its tag degrades to `model:claude` --
+                the runner, not a model -- and the per-request answer is the gateway's
+                `model_group`, which for these is already the runner's spelling
+                (`claude-sonnet-5`, `claude-haiku-4.5`).
+
+    So: the tag when it names a model, `model_group` when it only names the runner. Falling
+    back to the gateway's billed id keeps a row attributable if both are missing, at the cost
+    of it landing in the provider's namespace -- visible, rather than dropped.
+    """
+    tagged = next((t[len(MODEL_TAG):] for t in tags if t.startswith(MODEL_TAG)), "")
+    if tagged and tagged != runner:
+        return tagged
+    return str(row.get("model_group") or row.get("model") or "unknown")
+
+
+def by_run_and_model(rows: list[dict]) -> dict[tuple[str, str, str, str], float]:
+    """Sum spend per (run, alias, provider model, runner), keeping only tagged review traffic.
 
     Untagged rows are skipped rather than bucketed as "unknown": this repository's own
     history contains $1.10 of Claude spend from before tagging existed, and folding that
-    into any run would silently overstate it.
+    into any run would silently overstate it. `coverage_gap` reports what that skipping costs.
     """
-    totals: dict[tuple[str, str, str], float] = defaultdict(float)
+    totals: dict[tuple[str, str, str, str], float] = defaultdict(float)
     for row in rows:
-        tags = row.get("request_tags") or []
-        if not isinstance(tags, list):
-            continue
-        run_id = next((t[len(RUN_TAG):] for t in tags if isinstance(t, str) and t.startswith(RUN_TAG)), "")
+        tags = tags_of(row)
+        run_id = next((t[len(RUN_TAG):] for t in tags if t.startswith(RUN_TAG)), "")
         if not run_id:
             continue
-        runner = next(
-            (t[len(RUNNER_TAG):] for t in tags if isinstance(t, str) and t.startswith(RUNNER_TAG)), ""
-        )
-        # The gateway's own model id, which is what it priced -- not the reviewer's alias.
-        model = str(row.get("model") or "unknown")
+        runner = next((t[len(RUNNER_TAG):] for t in tags if t.startswith(RUNNER_TAG)), "")
+        # The gateway's own model id, which is what it priced -- not the runner's alias.
+        provider_model = str(row.get("model") or "unknown")
         try:
             spend = float(row.get("spend") or 0.0)
         except (TypeError, ValueError):
             continue
-        totals[(run_id, model, runner)] += spend
+        totals[(run_id, model_alias(row, tags, runner), provider_model, runner)] += spend
     return totals
 
 
-def metrics_payload(totals: dict[tuple[str, str, str], float], *, observed_at_unix_nano: int) -> dict:
+def metrics_payload(totals: dict[tuple[str, str, str, str], float], *, observed_at_unix_nano: int) -> dict:
     points = [
         {
             "timeUnixNano": str(observed_at_unix_nano),
             "asDouble": spend,
             "attributes": [
                 {"key": "github.run.id", "value": {"stringValue": run_id}},
-                {"key": "model", "value": {"stringValue": model}},
+                {"key": "model", "value": {"stringValue": alias}},
+                {"key": "gto.model.provider_id", "value": {"stringValue": provider_model}},
                 {"key": "gto.review.runner", "value": {"stringValue": runner or "unknown"}},
             ],
         }
-        for (run_id, model, runner), spend in sorted(totals.items())
+        for (run_id, alias, provider_model, runner), spend in sorted(totals.items())
     ]
     return {
         "resourceMetrics": [{
@@ -200,9 +260,9 @@ def main() -> int:
     orphans, orphan_spend = coverage_gap(rows)
     if orphans:
         print(
-            f"::warning title=Agent spend missing a run id::{orphans} tagged agent "
-            f"requests (${orphan_spend:.4f}) carry no run:<id>, so their cost cannot be "
-            f"attributed and every cost panel reads low by that amount",
+            f"::warning title=Agent spend missing a run id::{orphans} requests "
+            f"(${orphan_spend:.4f}) billed to a CI key carry no run:<id>, so their cost "
+            f"cannot be attributed and every cost panel reads low by that amount",
             flush=True,
         )
 
@@ -220,11 +280,15 @@ def main() -> int:
         return 1
 
     total = sum(totals.values())
-    runs = len({run_id for run_id, _, _ in totals})
+    runs = len({run_id for run_id, _, _, _ in totals})
     print(f"[export] {runs} runs, {len(totals)} run/model pairs, ${total:.4f} across {len(rows)} rows",
           flush=True)
-    for (run_id, model, runner), spend in sorted(totals.items(), key=lambda item: -item[1])[:20]:
-        print(f"[export]   run={run_id} runner={runner or '-'} model={model} spend=${spend:.4f}", flush=True)
+    for (run_id, alias, provider_model, runner), spend in sorted(totals.items(), key=lambda item: -item[1])[:20]:
+        print(
+            f"[export]   run={run_id} runner={runner or '-'} model={alias} "
+            f"billed_as={provider_model} spend=${spend:.4f}",
+            flush=True,
+        )
     return 0
 
 
