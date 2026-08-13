@@ -744,7 +744,13 @@ def build_summary_payloads(
     classification = report["classification"]
     main = report["main"]
     concerns = classification.get("concerns") or []
-    models = "+".join(sorted(report["model_usage"])) or "unknown"
+    # The model that REVIEWED. Never a "+"-joined set: a Claude review is two invocations
+    # (one model reviews, another classifies), and gluing their names together produced a
+    # `model` label that is not a model — it matched no gateway model id, so any join on
+    # model silently dropped Claude, and grouping a chart by model returned one row for the
+    # pair. The classifier is reported as its own agent run below instead.
+    review_models = sorted(report.get("review_model_usage") or report["model_usage"] or {})
+    models = review_models[0] if review_models else "unknown"
     pull_request = metadata["pull_request"]
     attrs: dict[str, object] = {
         # The shared set, identical to the opencode reviewer's by construction rather than
@@ -797,20 +803,61 @@ def build_summary_payloads(
     scope = {"name": "gto.actions.claude_review", "version": str(SCHEMA_VERSION)}
     timestamp = str(observed_at_unix_nano)
     cost = report["total_cost_usd"]
+    duration_seconds = max(observed_at_unix_nano - int(metadata["started_at_unix_nano"]), 0) / 1e9
+    classifier = report.get("classifier") or {}
+    # Two invocations, two runs. The classifier is a different model doing a different job,
+    # so it gets its own series with `task="classification"` rather than being folded into
+    # the review's labels. That makes per-task cost answerable and keeps `model` meaning one
+    # model, which is what every join and every group-by assumes.
+    #
+    # Counting reviews is therefore `gto_ai_agent_runs{task="pr_review"}`, not a bare count.
+    classifier_attrs = {
+        **agent_attributes(
+            runner="claude",
+            task="classification",
+            # The model Claude actually reported using, falling back to what was asked for:
+            # the request names an alias ("haiku"), the usage names the resolved model.
+            model=(sorted(report.get("classifier_model_usage") or {}) or
+                   [str(classifier.get("model") or "unknown")])[0],
+            repository=metadata["github"]["repository"],
+            change_number=pull_request["number"],
+            status=report["classification_status"],
+            success=report["classification_status"] == "success",
+            change_title=pull_request["title"],
+            change_url=pull_request["url"],
+            change_author=pull_request["author"],
+            changed_files=pull_request.get("changed_files") or 0,
+            head_ref=pull_request.get("head_ref", ""),
+            head_revision=pull_request.get("head_sha", ""),
+            base_revision=pull_request.get("base_sha", ""),
+            run_id=metadata["github"]["run_id"],
+            run_attempt=metadata["github"]["run_attempt"],
+            actor=metadata["github"].get("actor", ""),
+            api_key_alias=metadata["attribution"]["api_key_alias"],
+            code_areas=metadata["attribution"]["code_areas"],
+            department=metadata["attribution"]["department"],
+            team_id=metadata["attribution"]["team_id"],
+        ),
+        "gto.review.invocation": "classifier",
+    }
     metrics = {
         "resourceMetrics": [{
             "resource": resource,
             "scopeMetrics": [{
                 "scope": scope,
-                "metrics": agent_metrics(
-                    attrs,
-                    observed_at_unix_nano=observed_at_unix_nano,
-                    cost_usd=cost,
-                    duration_seconds=max(
-                        observed_at_unix_nano - int(metadata["started_at_unix_nano"]), 0
-                    )
-                    / 1_000_000_000,
-                ),
+                "metrics": [
+                    *agent_metrics(
+                        attrs,
+                        observed_at_unix_nano=observed_at_unix_nano,
+                        cost_usd=float(main.get("cost_usd") or 0.0) or cost,
+                        duration_seconds=duration_seconds,
+                    ),
+                    *agent_metrics(
+                        classifier_attrs,
+                        observed_at_unix_nano=observed_at_unix_nano,
+                        cost_usd=float(classifier.get("cost_usd") or 0.0),
+                    ),
+                ],
             }],
         }]
     }
@@ -979,6 +1026,10 @@ def report() -> int:
         "classification_status": classification_status,
         "classification": classification,
         "model_usage": merged_usage(model_usage(review_result), model_usage(classifier_result)),
+        # Kept per invocation, not only merged: the merged map cannot say which model did
+        # the reviewing, and picking one out of it alphabetically returns the classifier.
+        "review_model_usage": model_usage(review_result),
+        "classifier_model_usage": model_usage(classifier_result),
         "total_cost_usd": numeric_cost(review_result) + numeric_cost(classifier_result),
         "timeline": timeline,
         "artifacts": {
