@@ -1,0 +1,118 @@
+name: Report an AI agent run
+description: >-
+  Publish one AI agent run to OTLP. The only writer of `gto.ai.agent.*` — runners produce
+  numbers, task layers produce meaning, and this turns both into one series.
+
+inputs:
+  task:
+    description: >-
+      What the run was asked to do — pr_review, summarize, classification. A label, never
+      part of a metric name: these runners are general LLM inference in CI.
+    required: true
+  runner:
+    description: Which CLI ran it — opencode, claude.
+    required: true
+  model:
+    description: >-
+      The model as the RUNNER asked for it, not as the gateway billed it. This is the join
+      key against gateway spend, which carries the same spelling since actions-templates#55.
+    required: true
+  status:
+    description: >-
+      How it ended — success, unusable, error, timeout, cancelled, rejected. Pass the
+      runner's status unless your contract rejected the answer, which makes it `unusable`.
+    required: true
+  success:
+    description: >-
+      Whether the run did its job. Defaults to `status == success`. State it explicitly when
+      your contract disagrees — a run can exit cleanly and still answer uselessly.
+    required: false
+    default: ""
+  pr-number:
+    description: >-
+      Pull request this run was about. Used to resolve title, author, base and head, so
+      every task layer describes a change identically.
+    required: false
+    default: ""
+  github-token:
+    description: "Token used to resolve the pull request. Needs `pull-requests: read`."
+    required: false
+    default: ${{ github.token }}
+  duration-seconds:
+    description: Wall-clock seconds the run took. Omit if unknown — absent, not zero.
+    required: false
+    default: ""
+  tokens:
+    description: >-
+      JSON object of token counters, e.g. `opencode-run`'s `tokens` output. Omit if the
+      runner cannot report them.
+    required: false
+    default: ""
+  findings:
+    description: How many findings the run produced, when the task has such a notion.
+    required: false
+    default: ""
+  extra-attributes:
+    description: >-
+      JSON object of task-specific dimensions — verdict, complexity, risk. Keep them
+      low-cardinality: every distinct combination is a time series. Keys that collide with
+      the shared attribute set are refused, so a task cannot redefine what a dashboard
+      groups by.
+    required: false
+    default: ""
+  api-key-alias:
+    description: Safe service-key alias attached to telemetry; never pass a credential here.
+    required: false
+    default: ""
+  department:
+    description: Executive department attribution attached to telemetry.
+    required: false
+    default: ""
+  team-id:
+    description: Budget-holder team identifier attached to telemetry.
+    required: false
+    default: ""
+  code-areas:
+    description: Optional low-cardinality code areas supplied by the consumer.
+    required: false
+    default: repository
+  metrics-endpoint:
+    description: >-
+      OTLP/HTTP metrics endpoint. Pass an empty string to skip publishing — useful for a dry
+      run, and the reason this action never fails a job on a delivery error.
+    required: false
+    default: http://alloy-alloy-general.alloy.svc.cluster.local:4318/v1/metrics
+  python-version:
+    description: Provision this Python before running. Empty uses whatever the runner has.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Provision Python for this action
+      if: inputs.python-version != ''
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # pin@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Publish the run
+      shell: bash
+      env:
+        INPUT_TASK: ${{ inputs.task }}
+        INPUT_RUNNER: ${{ inputs.runner }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_STATUS: ${{ inputs.status }}
+        INPUT_SUCCESS: ${{ inputs.success }}
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_DURATION_SECONDS: ${{ inputs.duration-seconds }}
+        INPUT_TOKENS: ${{ inputs.tokens }}
+        INPUT_FINDINGS: ${{ inputs.findings }}
+        INPUT_EXTRA_ATTRIBUTES: ${{ inputs.extra-attributes }}
+        INPUT_API_KEY_ALIAS: ${{ inputs.api-key-alias }}
+        INPUT_DEPARTMENT: ${{ inputs.department }}
+        INPUT_TEAM_ID: ${{ inputs.team-id }}
+        INPUT_CODE_AREAS: ${{ inputs.code-areas }}
+        INPUT_METRICS_ENDPOINT: ${{ inputs.metrics-endpoint }}
+      run: python3 "${{ github.action_path }}/report_agent_run.py"
