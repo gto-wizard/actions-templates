@@ -218,6 +218,42 @@ AGENT_METRIC_DURATION = "gto.ai.agent.duration_seconds"
 # only reason a dashboard can join them.
 AGENT_METRIC_GATEWAY_COST = "gto.ai.agent.gateway_cost_usd"
 
+# --- the outcome vocabulary -------------------------------------------------------------
+#
+# Closed and shared, so two runners cannot describe the same ending with different words.
+# The distinction that matters is WHOSE fault an ending is, because a dashboard comparing
+# models must exclude the endings that say nothing about a model:
+#
+#   success   the agent ran and produced a usable answer
+#   unusable  it answered, in the wrong shape          <- the model's fault
+#   error     it ran and broke                         <- the run's fault
+#   timeout   it ran and never converged               <- the run's fault
+#   cancelled it was taken away mid-flight             <- nobody's fault; a re-push
+#   rejected  it was never admitted at all             <- nobody's fault; the gateway said no
+#
+# `rejected` exists because a 429 for an exhausted key was being recorded as a review that
+# failed. No model was involved: the request did not reach one. Recording that as a failure
+# defames every model on the panel and hides an operational problem (a dead key) inside a
+# quality signal.
+STATUS_SUCCESS = "success"
+STATUS_UNUSABLE = "unusable"
+STATUS_ERROR = "error"
+STATUS_TIMEOUT = "timeout"
+STATUS_CANCELLED = "cancelled"
+STATUS_REJECTED = "rejected"
+
+# HTTP statuses where the gateway refused to serve the request rather than a model failing
+# it: auth, payment/budget, forbidden, and rate/quota limits.
+GATEWAY_REJECTION_STATUSES = frozenset({401, 402, 403, 429})
+
+
+def is_gateway_rejection(http_status: object) -> bool:
+    """True when the gateway refused the request outright, so no model ever saw it."""
+    try:
+        return int(http_status) in GATEWAY_REJECTION_STATUSES
+    except (TypeError, ValueError):
+        return False
+
 
 def agent_attributes(
     *,

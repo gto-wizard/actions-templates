@@ -538,3 +538,64 @@ class SummaryPayloadTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TerminalStatusTest(unittest.TestCase):
+    """A run that failed must never be recorded as a successful review.
+
+    Verbatim from run 31651192958: Claude Code reported `subtype: "success"` on a review
+    killed by a 429 budget rejection, and the action published `review_status="success"`.
+    The real cause was recoverable only by downloading the execution artifact.
+    """
+
+    BUDGET_429 = {
+        "subtype": "success",
+        "is_error": True,
+        "terminal_reason": "api_error",
+        "api_error_status": 429,
+    }
+
+    def test_a_budget_rejection_is_rejected_not_failed(self) -> None:
+        # The request never reached a model, so this says nothing about the reviewer.
+        self.assertEqual(
+            "rejected", MODULE.terminal_status(self.BUDGET_429, "failure", is_error=True)
+        )
+
+    def test_a_server_fault_is_an_error_not_a_rejection(self) -> None:
+        # 5xx means the request WAS admitted and then broke. Calling that `rejected` would
+        # hide an outage as a billing problem.
+        self.assertEqual(
+            "api_error",
+            MODULE.terminal_status(
+                {"subtype": "success", "is_error": True,
+                 "terminal_reason": "api_error", "api_error_status": 500},
+                "failure", is_error=True),
+        )
+
+    def test_no_failed_run_ever_reads_as_success(self) -> None:
+        for result in (
+            self.BUDGET_429,
+            {"subtype": "success", "is_error": True},          # no terminal reason at all
+            {"subtype": "error_max_turns", "is_error": True},
+            {},
+        ):
+            with self.subTest(result=result):
+                self.assertNotEqual(
+                    "success", MODULE.terminal_status(result, "failure", is_error=True)
+                )
+
+    def test_a_clean_run_is_untouched(self) -> None:
+        self.assertEqual(
+            "success",
+            MODULE.terminal_status({"subtype": "success", "is_error": False}, "success", is_error=False),
+        )
+
+    def test_the_reason_survives_without_a_status_code(self) -> None:
+        self.assertEqual(
+            "api_error",
+            MODULE.terminal_status(
+                {"subtype": "success", "is_error": True, "terminal_reason": "api_error"},
+                "failure",
+                is_error=True,
+            ),
+        )

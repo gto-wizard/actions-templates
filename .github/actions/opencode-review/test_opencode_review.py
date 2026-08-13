@@ -582,3 +582,47 @@ class ProvenanceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RejectionTest(unittest.TestCase):
+    """A gateway refusal is not a model failing.
+
+    Verbatim from the round where the review key ran out of budget: every reviewer on the
+    panel recorded a failure for an operational problem none of them caused.
+    """
+
+    BUDGET_ERROR = (
+        "API Error: Request rejected (429) · Budget has been exceeded! "
+        "Key=gto-brain-opencode-review-tmp Current cost: 12.01, Max budget: 12.0"
+    )
+
+    def test_recognises_the_gateway_refusing(self) -> None:
+        for text in (self.BUDGET_ERROR, "ExceededBudget: User=x over budget", "AuthenticationError"):
+            with self.subTest(text=text[:30]):
+                self.assertTrue(MODULE.looks_rejected(text))
+
+    def test_does_not_fire_on_an_ordinary_diff(self) -> None:
+        # A bare "429" appears in real diffs -- line numbers, ports, test fixtures.
+        for text in ("+  assert response.status == 429", "changed 429 lines", "", "budget: 12.0"):
+            with self.subTest(text=text):
+                self.assertFalse(MODULE.looks_rejected(text))
+
+    def test_rejected_outranks_every_other_ending(self) -> None:
+        # Whatever the exit code says, an unanswered request is not the model's fault.
+        for exit_code in (0, 1, 124):
+            with self.subTest(exit_code=exit_code):
+                self.assertEqual(
+                    "rejected",
+                    MODULE.run_status(exit_code=exit_code, valid=False, cancelled=False, rejected=True),
+                )
+
+    def test_a_rejected_run_is_never_recorded_as_unusable(self) -> None:
+        report = MODULE.build_report(
+            METADATA,
+            events(text=self.BUDGET_ERROR),
+            model="kimi-k3",
+            provider="gtowizard",
+            exit_code=1,
+        )
+        self.assertEqual("rejected", report["session"]["status"])
+        self.assertNotEqual("unusable", report["session"]["status"])

@@ -34,7 +34,10 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
 
 from gto_otlp import (  # noqa: E402 - sys.path must be set before this import
+    STATUS_ERROR,
+    STATUS_REJECTED,
     change_ref,
+    is_gateway_rejection,
     litellm_tags,
     otel_attributes,
     post_json,
@@ -489,6 +492,31 @@ def read_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def terminal_status(result: dict[str, Any], conclusion: str, *, is_error: bool) -> str:
+    """The status a dashboard should show, which is not always what Claude Code calls it.
+
+    `subtype` describes how the turn loop ended, not whether the run worked: a review
+    killed by a 429 still reports `subtype: "success"` with `is_error: true` and the real
+    cause in `terminal_reason`. Taking `subtype` at face value recorded a budget-exhausted
+    run as a successful review — the failure was visible only inside the execution artifact.
+
+    A gateway refusal is `rejected`, NOT a failure: on a 401/402/403/429 the request never
+    reached a model, so calling it a failed review blames whichever model was on the panel
+    and buries an operational problem — an exhausted key — inside a quality signal. The
+    exact code stays on `gto.review.api_error_status` for whoever has to fix it.
+    """
+    if is_error and is_gateway_rejection(result.get("api_error_status")):
+        return STATUS_REJECTED
+    if is_error and result.get("terminal_reason"):
+        return str(result["terminal_reason"])
+    if is_error:
+        # A failed run must never read as "success", whatever `subtype` claims. With no
+        # terminal reason to name the cause, "error" is the honest floor.
+        subtype = str(result.get("subtype") or "")
+        return subtype if subtype and subtype != "success" else (conclusion or STATUS_ERROR)
+    return str(result.get("subtype") or conclusion or "unknown")
+
+
 def result_event(events: list[dict[str, Any]]) -> dict[str, Any]:
     return next((event for event in reversed(events) if event.get("type") == "result"), {})
 
@@ -746,6 +774,9 @@ def build_summary_payloads(
         ),
         # Facts only this runner produces: it is the only reviewer that classifies.
         "gto.review.invocation": metadata["github"]["invocation"],
+        # Why a run ended, not just that it did. Bounded: a handful of reasons and codes.
+        "gto.review.terminal_reason": main.get("terminal_reason") or "",
+        "gto.review.api_error_status": main.get("api_error_status") or 0,
         "gto.review.change_type": classification["change_type"],
         "gto.review.domain": classification["domain"],
         "gto.review.concerns": "+".join(concerns) or "none",
@@ -789,6 +820,9 @@ def build_summary_payloads(
     event_attrs = {
         **attrs,
         "cost_usd": cost,
+        # The gateway's own words -- "Budget has been exceeded! ... Max budget: 5.0" is the
+        # difference between a five-minute fix and downloading an artifact to find out.
+        "gto.review.error": main.get("error") or "",
         **{f"vcs.change.{name}": int(value) for name, value in counts.items()},
         "gto.review.timeline.status": (metadata.get("timeline") or {}).get("status", "skipped"),
     }
@@ -911,6 +945,8 @@ def report() -> int:
 
     review_conclusion = env("GTO_CLAUDE_REVIEW_CONCLUSION")
     is_error = bool(review_result.get("is_error")) or review_conclusion not in ("", "success")
+    terminal_reason = str(review_result.get("terminal_reason") or "")
+    api_error_status = review_result.get("api_error_status")
     timeline = metadata.get("timeline") or {}
     run_report = {
         "schema_version": SCHEMA_VERSION,
@@ -918,8 +954,18 @@ def report() -> int:
         "metadata": metadata,
         "main": {
             "conclusion": review_conclusion or "unknown",
-            "status": review_result.get("subtype") or review_conclusion or "unknown",
+            # NOT `subtype` alone. Claude Code reports `subtype: "success"` on runs that
+            # died, putting the real cause in `terminal_reason`/`api_error_status` — a
+            # budget-exhausted run (429) arrived here reading `status: success`, so the
+            # dashboard showed a successful review and the actual reason was only
+            # recoverable by downloading the execution artifact. The terminal reason wins
+            # whenever the run errored.
+            "status": terminal_status(review_result, review_conclusion, is_error=is_error),
             "is_error": is_error,
+            "terminal_reason": terminal_reason,
+            "api_error_status": api_error_status,
+            # Unbounded text: it rides the log record and the span, never a metric label.
+            "error": clipped_body(review_result.get("result") or "") if is_error else "",
             "session_id": env("GTO_CLAUDE_REVIEW_SESSION_ID") or review_result.get("session_id"),
             "cost_usd": numeric_cost(review_result),
             "turns": review_result.get("num_turns"),
