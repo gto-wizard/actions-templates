@@ -1,0 +1,259 @@
+name: Run Claude Code
+description: >-
+  Run one Claude Code session with the CLI's own telemetry configured and hooks installed for
+  how the run ended. Execs the binary with argv you supply — no SDK wrapper, no prompt of its
+  own, no review plumbing. Compose it with `report-agent-run` and a task layer.
+
+inputs:
+  prompt:
+    description: >-
+      The instruction, in full. There is no built-in prompt: this is a binary wrapper, and
+      what to ask for belongs to the repository that is asking.
+    required: true
+  claude-args:
+    description: >-
+      Extra argv passed through to the CLI verbatim — `--max-turns`, `--allowed-tools`,
+      `--resume <uuid>`, `--max-budget-usd`. Verbatim is the point: `claude-code-action`'s
+      SDK side-channel broke `--resume` on five consecutive runs, which is why this action
+      execs the binary instead of wrapping it.
+    required: false
+    default: ""
+  model:
+    description: Model as the gateway serves it, or an alias when going direct to Anthropic.
+    required: false
+    default: sonnet
+  setting-sources:
+    description: >-
+      Which of the CLI's own settings this run trusts — `user`, `project`, `local`, comma
+      separated. THE TRUST BOUNDARY, and the reason it is an input rather than a constant.
+
+      `user` (the default) ignores the checkout, which is correct whenever the thing being
+      read is untrusted: a pull request must not be able to configure the agent reviewing it.
+      Add `project,local` only when the repository's own substrate IS the thing you meant to
+      run — a repo whose `.claude/` carries the skills and agents the task depends on.
+
+      Our hooks arrive separately via `--settings`, so widening this grants the repository
+      configuration without ever removing the callbacks.
+    required: false
+    default: user
+  timeout-seconds:
+    description: >-
+      Hard bound on the run. On expiry the process is interrupted and whatever it produced is
+      still reported — but note that a kill from outside is the one ending no hook can
+      report, so the exit code is the only evidence and the status will read `timeout`.
+    required: false
+    default: "900"
+  claude-executable:
+    description: >-
+      Absolute path to an already-installed `claude`. This is how a caller pins a version and
+      keeps a warm cache. Empty resolves `claude` from PATH.
+    required: false
+    default: ""
+  anthropic-base-url:
+    description: >-
+      Gateway base URL. Set it to route through LiteLLM, which is what makes the spend
+      attributable — a direct Anthropic key produces no spend-log row, so the cost panels
+      report the repository as free rather than as unknown.
+    required: false
+    default: ""
+  anthropic-api-key:
+    description: Credential for the base URL above. A LiteLLM virtual key when one is set.
+    required: false
+    default: ""
+  task:
+    description: >-
+      What this run is for — pr_review, summarize, classification. A label on every signal,
+      never part of a metric name.
+    required: false
+    default: unknown
+  pr-number:
+    description: Pull request this run is about, for attribution on the CLI's native signals.
+    required: false
+    default: ""
+  api-key-alias:
+    description: Safe service-key alias attached to telemetry; never pass a credential here.
+    required: false
+    default: ""
+  department:
+    description: Executive department attribution attached to telemetry.
+    required: false
+    default: ""
+  team-id:
+    description: Budget-holder team identifier attached to telemetry.
+    required: false
+    default: ""
+  code-areas:
+    description: Optional low-cardinality code areas supplied by the consumer.
+    required: false
+    default: repository
+  metrics-endpoint:
+    description: OTLP/HTTP metrics endpoint the CLI exports to. Empty disables native metrics.
+    required: false
+    default: http://alloy-alloy-general.alloy.svc.cluster.local:4318/v1/metrics
+  traces-endpoint:
+    description: OTLP/HTTP traces endpoint.
+    required: false
+    default: http://alloy-alloy-general.alloy.svc.cluster.local:4318/v1/traces
+  logs-endpoint:
+    description: OTLP/HTTP logs endpoint.
+    required: false
+    default: http://alloy-alloy-general.alloy.svc.cluster.local:4318/v1/logs
+  python-version:
+    description: Provision this Python before running. Empty uses whatever the runner has.
+    required: false
+    default: ""
+
+outputs:
+  status:
+    description: >-
+      How the RUN ended — success, error, timeout, cancelled or rejected. Never `unusable`:
+      whether the ANSWER was any good is a contract judgement belonging to whatever asked.
+      `rejected` comes from the CLI's own `StopFailure` reason, not from guessing at text.
+    value: ${{ steps.collect.outputs.status }}
+  success:
+    description: "`true` only when status is success."
+    value: ${{ steps.collect.outputs.success }}
+  exit-code:
+    description: The CLI's exit code, or empty when the step was killed before writing one.
+    value: ${{ steps.collect.outputs.exit-code }}
+  text-file:
+    description: >-
+      Path to the model's answer. A file rather than an output value: answers exceed what
+      `$GITHUB_OUTPUT` carries, and a model emitting a heredoc delimiter would corrupt it.
+    value: ${{ steps.collect.outputs.text-file }}
+  text-bytes:
+    description: Size of that file, so a caller can notice an empty answer.
+    value: ${{ steps.collect.outputs.text-bytes }}
+  session-id:
+    description: The CLI's session id, for a caller that wants to `--resume` it later.
+    value: ${{ steps.collect.outputs.session-id }}
+  end-reasons:
+    description: What the hooks reported, comma separated — `rate_limit`, `logout`, and so on.
+    value: ${{ steps.collect.outputs.end-reasons }}
+  duration-seconds:
+    description: Wall-clock seconds the CLI ran.
+    value: ${{ steps.run.outputs.duration-seconds }}
+  transcript-file:
+    description: Path to the raw `stream-json` transcript.
+    value: ${{ steps.run.outputs.transcript-file }}
+  model:
+    description: The model this run used.
+    value: ${{ steps.prepare.outputs.model }}
+
+runs:
+  using: composite
+  steps:
+    - name: Provision Python for this action
+      if: inputs.python-version != ''
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # pin@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Prepare the run
+      id: prepare
+      shell: bash
+      env:
+        INPUT_PROMPT: ${{ inputs.prompt }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_TASK: ${{ inputs.task }}
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        INPUT_API_KEY_ALIAS: ${{ inputs.api-key-alias }}
+        INPUT_DEPARTMENT: ${{ inputs.department }}
+        INPUT_TEAM_ID: ${{ inputs.team-id }}
+        INPUT_CODE_AREAS: ${{ inputs.code-areas }}
+      run: python3 "${{ github.action_path }}/claude_run.py" prepare
+
+    - name: Run
+      id: run
+      shell: bash
+      env:
+        # The run's own HOME: session state and any `user` settings resolve here rather than
+        # to the checkout, so a pull request cannot replace them while a credential is set.
+        HOME: ${{ steps.prepare.outputs.home-dir }}
+        ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
+        PROMPT_FILE: ${{ steps.prepare.outputs.prompt-file }}
+        SETTINGS_FILE: ${{ steps.prepare.outputs.settings-file }}
+        SETTING_SOURCES: ${{ inputs.setting-sources }}
+        CLAUDE_ARGS: ${{ inputs.claude-args }}
+        CLAUDE_BIN: ${{ inputs.claude-executable }}
+        MODEL: ${{ steps.prepare.outputs.model }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        # Claude Code reads its telemetry configuration from the process environment at
+        # start. There is no interception here and nothing forwards on its behalf: the CLI
+        # holds an OTel SDK and exports straight to these endpoints. All this action does is
+        # switch it on, say where, and stamp who the run was for.
+        CLAUDE_CODE_ENABLE_TELEMETRY: "1"
+        CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1"
+        OTEL_METRICS_EXPORTER: otlp
+        OTEL_LOGS_EXPORTER: otlp
+        OTEL_TRACES_EXPORTER: otlp
+        OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+        # Prometheus-shaped stores cannot take delta.
+        OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: cumulative
+        # The SDK default is 60s. A CI job that finishes sooner would exit carrying its last
+        # batch, so a short run would report nothing at all.
+        OTEL_METRIC_EXPORT_INTERVAL: "5000"
+        OTEL_LOGS_EXPORT_INTERVAL: "1000"
+        OTEL_TRACES_EXPORT_INTERVAL: "1000"
+        OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES: "true"
+        OTEL_METRICS_INCLUDE_SESSION_ID: "false"
+        OTEL_METRICS_INCLUDE_ACCOUNT_UUID: "false"
+        # Signals carry shape and cost, never content. The transcript is evidence and stays
+        # on the runner; telemetry leaves the machine.
+        OTEL_LOG_USER_PROMPTS: "0"
+        OTEL_LOG_TOOL_DETAILS: "0"
+        OTEL_LOG_TOOL_CONTENT: "0"
+        OTEL_LOG_RAW_API_BODIES: "0"
+        OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${{ inputs.metrics-endpoint }}
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ inputs.traces-endpoint }}
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${{ inputs.logs-endpoint }}
+        OTEL_RESOURCE_ATTRIBUTES: ${{ steps.prepare.outputs.resource-attributes }}
+        # Splits this run's gateway spend out of one anonymous `User-Agent: claude-cli`
+        # bucket. Ignored by the Anthropic API; only LiteLLM reads it.
+        ANTHROPIC_CUSTOM_HEADERS: "x-litellm-tags: ${{ steps.prepare.outputs.litellm-tags }}"
+      run: |
+        set -uo pipefail
+        # errexit OFF, deliberately. GitHub runs composite `run` steps under `bash -e`, so a
+        # non-zero pipeline would abort at the pipeline itself and never reach the exit-code
+        # output below — after which the collector can only fabricate one.
+        set +e
+        BIN="${CLAUDE_BIN:-claude}"
+        command -v "$BIN" >/dev/null 2>&1 || { echo "::error::no claude binary at ${BIN}"; exit 1; }
+        TRANSCRIPT="$ARTIFACT_DIR/transcript.jsonl"
+        echo "transcript-file=$TRANSCRIPT" >> "$GITHUB_OUTPUT"
+        echo "Running $("$BIN" --version 2>/dev/null || echo claude) with model $MODEL"
+        STARTED="$(date +%s)"
+        # `--settings` carries our hooks and is additive to `--setting-sources`, so the trust
+        # decision and the callbacks are independent. Word-splitting CLAUDE_ARGS is intended:
+        # it is argv, and the caller owns it.
+        # shellcheck disable=SC2086
+        timeout --signal=INT "$TIMEOUT_SECONDS" \
+          "$BIN" -p "$(cat "$PROMPT_FILE")" \
+            --output-format stream-json --verbose \
+            --model "$MODEL" \
+            --settings "$SETTINGS_FILE" \
+            --setting-sources "$SETTING_SOURCES" \
+            $CLAUDE_ARGS \
+          | tee "$TRANSCRIPT" \
+          | grep --line-buffered -oE '"(type|subtype|name)":"[^"]*"' || true
+        STATUS="${PIPESTATUS[0]}"
+        if [ "$STATUS" = "124" ]; then
+          echo "::warning title=Claude run timed out::stopped after ${TIMEOUT_SECONDS}s; the partial transcript is still reported"
+        fi
+        echo "exit-code=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "duration-seconds=$(( $(date +%s) - STARTED ))" >> "$GITHUB_OUTPUT"
+
+    - name: Collect the outcome
+      id: collect
+      if: always() && steps.prepare.outputs.artifact-dir != ''
+      shell: bash
+      env:
+        INPUT_ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
+        # Deliberately NOT defaulted: empty is the signal that the run step was killed before
+        # it could write one, which is what a cancellation looks like from here. `cancelled()`
+        # is unavailable to a composite action — using it made GitHub reject an entire action
+        # file with "Unrecognized function", failing every job at "Set up job".
+        INPUT_EXIT_CODE: ${{ steps.run.outputs.exit-code }}
+      run: python3 "${{ github.action_path }}/claude_run.py" collect
