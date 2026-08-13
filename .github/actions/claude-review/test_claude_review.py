@@ -497,7 +497,14 @@ class SummaryPayloadTest(unittest.TestCase):
 
         payloads = MODULE.build_summary_payloads(metadata, report, observed_at_unix_nano=2_000_000_000)
         emitted = payloads["metrics"]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
-        by_name = {m["name"]: m for m in emitted}
+
+        def task_of(m):
+            return next(a["value"]["stringValue"] for a in m["gauge"]["dataPoints"][0]["attributes"]
+                        if a["key"] == "gto.ai.task")
+
+        # Two runs are emitted now -- the review and the classifier -- so a name alone is
+        # ambiguous. That ambiguity is the point: `model` means one model per series.
+        by_name = {m["name"]: m for m in emitted if task_of(m) == "pr_review"}
         metric = by_name["gto.ai.agent.cost_usd"]
         labels = {
             item["key"]: next(iter(item["value"].values()))
@@ -599,3 +606,67 @@ class TerminalStatusTest(unittest.TestCase):
                 is_error=True,
             ),
         )
+
+
+class ClassifierIsItsOwnRunTest(unittest.TestCase):
+    """A Claude review is two invocations; `model` must mean one model.
+
+    Observed: `model="claude-haiku-4.5+claude-sonnet-5"` — a label that is not a model. It
+    matched no gateway model id, so joining cost on model dropped Claude entirely, and
+    grouping a chart by model returned one row for the pair.
+    """
+
+    def _payloads(self):
+        metadata = {
+            "github": {"repository": "gto-wizard/gto-brain", "run_id": "1", "run_attempt": "1",
+                       "invocation": "primary", "actor": "MilosMosovsky"},
+            "pull_request": {"number": 182, "title": "t", "url": "u", "author": "a",
+                             "head_ref": "h", "head_sha": "s", "base_sha": "b"},
+            "attribution": {"code_areas": "repository", "api_key_alias": "k",
+                            "department": "DEVELOPMENT", "team_id": "team"},
+            "service_instance_id": "i", "started_at_unix_nano": 1_000_000_000,
+            "trace": {"trace_id": "a" * 32, "root_span_id": "b" * 16},
+        }
+        report = {
+            "classification": {"change_type": "refactor", "domain": "product", "concerns": [],
+                               "complexity": "hard", "risk": "safe", "summary": "s",
+                               "complexity_rationale": "r", "risk_rationale": "r"},
+            "main": {"status": "success", "is_error": False, "cost_usd": 0.75},
+            "classifier": {"model": "haiku", "cost_usd": 0.25},
+            "review_model_usage": {"claude-sonnet-5": {}},
+            "classifier_model_usage": {"claude-haiku-4.5": {}},
+            "model_usage": {"claude-sonnet-5": {}, "claude-haiku-4.5": {}},
+            "classification_status": "success",
+            "total_cost_usd": 1.0,
+        }
+        return MODULE.build_summary_payloads(metadata, report, observed_at_unix_nano=2_000_000_000)
+
+    def _runs(self):
+        emitted = self._payloads()["metrics"]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+        out = {}
+        for m in emitted:
+            point = m["gauge"]["dataPoints"][0]
+            labels = {a["key"]: next(iter(a["value"].values())) for a in point["attributes"]}
+            out.setdefault(labels["gto.ai.task"], {})[m["name"]] = (point, labels)
+        return out
+
+    def test_no_label_is_a_plus_joined_set_of_models(self) -> None:
+        for task, metrics in self._runs().items():
+            for name, (_, labels) in metrics.items():
+                with self.subTest(task=task, metric=name):
+                    self.assertNotIn("+", str(labels["model"]))
+
+    def test_the_reviewing_model_is_the_one_that_reviewed(self) -> None:
+        # Sorting the MERGED usage would pick claude-haiku-4.5 here, which is the classifier.
+        _, labels = self._runs()["pr_review"]["gto.ai.agent.cost_usd"]
+        self.assertEqual("claude-sonnet-5", labels["model"])
+
+    def test_the_classifier_is_its_own_run_with_its_own_model_and_cost(self) -> None:
+        point, labels = self._runs()["classification"]["gto.ai.agent.cost_usd"]
+        self.assertEqual("claude-haiku-4.5", labels["model"])
+        self.assertEqual(0.25, point["asDouble"])
+
+    def test_each_run_carries_its_own_cost_not_the_total(self) -> None:
+        runs = self._runs()
+        self.assertEqual(0.75, runs["pr_review"]["gto.ai.agent.cost_usd"][0]["asDouble"])
+        self.assertEqual(0.25, runs["classification"]["gto.ai.agent.cost_usd"][0]["asDouble"])

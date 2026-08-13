@@ -258,7 +258,7 @@ task, and both the runner and the task are labels — `gto.ai.task="pr_review"`,
 
 | metric | emitted when | notes |
 | --- | --- | --- |
-| `gto_ai_agent_runs` | always | the series to count. A run that could report nothing else still ran. |
+| `gto_ai_agent_runs` | always | the series to count. A run that could report nothing else still ran. **One LLM invocation is one run**, so counting reviews is `{task="pr_review"}` — a Claude review also emits a `task="classification"` run for its classifier pass. |
 | `gto_ai_agent_cost_usd` | the runner knows its price | Claude today. Absent, never zero — a zero reads as free. |
 | `gto_ai_agent_tokens` | the runner reports tokens | `kind` = input/output/reasoning/cache_read. |
 | `gto_ai_agent_findings` | the runner reports findings | opencode today. |
