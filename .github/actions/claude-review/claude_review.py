@@ -34,7 +34,10 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
 
 from gto_otlp import (  # noqa: E402 - sys.path must be set before this import
+    STATUS_ERROR,
+    STATUS_REJECTED,
     change_ref,
+    is_gateway_rejection,
     litellm_tags,
     otel_attributes,
     post_json,
@@ -497,19 +500,20 @@ def terminal_status(result: dict[str, Any], conclusion: str, *, is_error: bool) 
     cause in `terminal_reason`. Taking `subtype` at face value recorded a budget-exhausted
     run as a successful review — the failure was visible only inside the execution artifact.
 
-    The HTTP status is folded in because "it failed calling the API" and "it failed because
-    the key is out of budget" need different people to react. Cardinality stays trivial:
-    a handful of terminal reasons times a handful of status codes.
+    A gateway refusal is `rejected`, NOT a failure: on a 401/402/403/429 the request never
+    reached a model, so calling it a failed review blames whichever model was on the panel
+    and buries an operational problem — an exhausted key — inside a quality signal. The
+    exact code stays on `gto.review.api_error_status` for whoever has to fix it.
     """
+    if is_error and is_gateway_rejection(result.get("api_error_status")):
+        return STATUS_REJECTED
     if is_error and result.get("terminal_reason"):
-        reason = str(result["terminal_reason"])
-        code = result.get("api_error_status")
-        return f"{reason}_{code}" if code else reason
+        return str(result["terminal_reason"])
     if is_error:
         # A failed run must never read as "success", whatever `subtype` claims. With no
         # terminal reason to name the cause, "error" is the honest floor.
         subtype = str(result.get("subtype") or "")
-        return subtype if subtype and subtype != "success" else (conclusion or "error")
+        return subtype if subtype and subtype != "success" else (conclusion or STATUS_ERROR)
     return str(result.get("subtype") or conclusion or "unknown")
 
 

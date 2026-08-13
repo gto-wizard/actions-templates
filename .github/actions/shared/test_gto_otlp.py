@@ -151,3 +151,22 @@ class LitellmTagsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutcomeVocabularyTest(unittest.TestCase):
+    def test_gateway_refusals_are_recognised(self) -> None:
+        for status in (401, 402, 403, 429, "429"):
+            with self.subTest(status=status):
+                self.assertTrue(MODULE.is_gateway_rejection(status))
+
+    def test_a_server_fault_is_not_a_refusal(self) -> None:
+        # 5xx means the request WAS admitted and then broke -- that is an error, and
+        # collapsing it into `rejected` would hide a real outage as a billing problem.
+        for status in (500, 502, 503, 200, None, "", "nonsense"):
+            with self.subTest(status=status):
+                self.assertFalse(MODULE.is_gateway_rejection(status))
+
+    def test_the_vocabulary_is_closed_and_distinct(self) -> None:
+        words = {MODULE.STATUS_SUCCESS, MODULE.STATUS_UNUSABLE, MODULE.STATUS_ERROR,
+                 MODULE.STATUS_TIMEOUT, MODULE.STATUS_CANCELLED, MODULE.STATUS_REJECTED}
+        self.assertEqual(6, len(words))

@@ -555,9 +555,21 @@ class TerminalStatusTest(unittest.TestCase):
         "api_error_status": 429,
     }
 
-    def test_a_budget_rejection_is_not_a_successful_review(self) -> None:
+    def test_a_budget_rejection_is_rejected_not_failed(self) -> None:
+        # The request never reached a model, so this says nothing about the reviewer.
         self.assertEqual(
-            "api_error_429", MODULE.terminal_status(self.BUDGET_429, "failure", is_error=True)
+            "rejected", MODULE.terminal_status(self.BUDGET_429, "failure", is_error=True)
+        )
+
+    def test_a_server_fault_is_an_error_not_a_rejection(self) -> None:
+        # 5xx means the request WAS admitted and then broke. Calling that `rejected` would
+        # hide an outage as a billing problem.
+        self.assertEqual(
+            "api_error",
+            MODULE.terminal_status(
+                {"subtype": "success", "is_error": True,
+                 "terminal_reason": "api_error", "api_error_status": 500},
+                "failure", is_error=True),
         )
 
     def test_no_failed_run_ever_reads_as_success(self) -> None:

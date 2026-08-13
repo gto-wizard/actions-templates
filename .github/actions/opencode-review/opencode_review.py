@@ -43,6 +43,12 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
 
 from gto_otlp import (  # noqa: E402 - sys.path must be set before this import
+    STATUS_CANCELLED,
+    STATUS_ERROR,
+    STATUS_REJECTED,
+    STATUS_SUCCESS,
+    STATUS_TIMEOUT,
+    STATUS_UNUSABLE,
     litellm_tags,
     log_envelope,
     metrics_envelope,
@@ -553,19 +559,34 @@ def read_events(path: Path) -> list[dict[str, Any]]:
 # Why a run ended, as a dimension. Not a free-text field: this is what a dashboard groups by,
 # and it is the difference between "this model cannot hold the format" and "somebody pushed
 # again while it was thinking".
-STATUS_SUCCESS = "success"
-# "the model answered, but not in the shape asked for" is a fact about the model. "opencode
-# exited non-zero" is a fact about the run. Collapsing them into one word throws away the
-# distinction a model comparison is built on.
-STATUS_UNUSABLE = "unusable"
-STATUS_ERROR = "error"
-STATUS_TIMEOUT = "timeout"
-STATUS_CANCELLED = "cancelled"
-
+# The status words themselves come from `gto_otlp`, so this runner and the Claude one
+# cannot describe the same ending differently.
 TIMEOUT_EXIT_CODE = 124  # `timeout` says so
 
+# What a gateway refusal looks like in the event stream. opencode surfaces the provider's
+# error as text rather than a status code, so this matches LiteLLM's own wording. Anchored
+# on distinctive phrases, never a bare "429", which appears in ordinary diffs.
+GATEWAY_REJECTION_MARKERS = (
+    "budget has been exceeded",
+    "exceededbudget",
+    "request rejected (429)",
+    "rate limit exceeded",
+    "authenticationerror",
+    "invalid api key",
+)
 
-def run_status(*, exit_code: int, valid: bool, cancelled: bool) -> str:
+
+def looks_rejected(text: str) -> bool:
+    """True when the gateway refused the request, so no model ever answered it.
+
+    A refusal is not a model failing: recording an exhausted key as `unusable` blames every
+    reviewer on the panel for an operational problem. Same reasoning as `cancelled`.
+    """
+    haystack = (text or "").lower()
+    return any(marker in haystack for marker in GATEWAY_REJECTION_MARKERS)
+
+
+def run_status(*, exit_code: int, valid: bool, cancelled: bool, rejected: bool = False) -> str:
     """Distinguish the model failing from the run being taken away from it.
 
     A cancelled run cannot be detected from the exit code: the review step is killed before it
@@ -581,7 +602,12 @@ def run_status(*, exit_code: int, valid: bool, cancelled: bool) -> str:
     step. The run step disables errexit precisely so it always records an exit code on any
     normal end, including a timeout; no exit code therefore means the step never reached its
     last line, which is what being killed looks like.
+
+    A gateway refusal is `rejected` for the same reason: the request never reached a model,
+    so calling it an error hides a dead key inside a quality signal.
     """
+    if rejected:
+        return STATUS_REJECTED
     if cancelled:
         return STATUS_CANCELLED
     if exit_code == TIMEOUT_EXIT_CODE:
@@ -603,14 +629,19 @@ def build_report(
     """One opencode run, normalized into a report a human or an ingest can read."""
     text = review_text(events)
     review = extract_review(text)
+    # Checked against the WHOLE stream, not just the answer: a refusal usually arrives as an
+    # error event, so the model never produces an answer to inspect.
+    rejected = not cancelled and looks_rejected(json.dumps(events) + text)
     if cancelled:
         problems = ["the run was cancelled before the model finished answering"]
+    elif rejected:
+        problems = ["the gateway refused the request, so no model answered it"]
     elif review is None:
         problems = ["no JSON review object in the answer"]
     else:
         problems = validate_review(review)
-    valid = not cancelled and review is not None and not problems
-    status = run_status(exit_code=exit_code, valid=valid, cancelled=cancelled)
+    valid = not cancelled and not rejected and review is not None and not problems
+    status = run_status(exit_code=exit_code, valid=valid, cancelled=cancelled, rejected=rejected)
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at": datetime.now(UTC).isoformat(),
