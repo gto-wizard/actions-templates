@@ -57,8 +57,21 @@ class GenericityTests(unittest.TestCase):
         action = ACTION_INPUTS
         self.assertIn("prompt", action)
         self.assertTrue(action["prompt"].get("required"), "a runner with an optional prompt has a default one")
-        for leaked in ("pr-number", "extra-instructions", "base-sha", "head-sha", "github-token"):
+        for leaked in ("pr-number", "extra-instructions", "base-sha", "head-sha"):
             self.assertNotIn(leaked, action, f"{leaked!r} is task vocabulary; it does not belong in the runner")
+
+    def test_a_credential_is_never_required(self) -> None:
+        # `github-token` DID move into this action, and this test used to forbid it outright.
+        # That is a real erosion of the boundary, accepted deliberately: the `comment`
+        # capability hands the agent a credential so it can decide for itself to write back,
+        # which is the whole thing being evaluated. The intent-and-executor alternative keeps
+        # the runner ignorant of GitHub entirely.
+        #
+        # What must remain true is that it is OPTIONAL and empty by default. A runner that
+        # requires a token has made every read-only task carry one.
+        self.assertIn("github-token", ACTION_INPUTS)
+        self.assertFalse(ACTION_INPUTS["github-token"].get("required"))
+        self.assertFalse(ACTION_INPUTS["capabilities"].get("required"))
 
     def test_the_runner_publishes_no_telemetry(self) -> None:
         # Two producers for one metric family is what made the dashboard's cost join
@@ -81,6 +94,49 @@ class GenericityTests(unittest.TestCase):
         bash = MODULE.run_config("kimi-k3")["permission"]["bash"]
         self.assertEqual(bash["*"], "deny")
         self.assertNotIn("git push*", bash)
+
+
+class CapabilityTests(unittest.TestCase):
+    """A capability is a permission and a prompt fragment shipping together, or it is a bug."""
+
+    def test_default_is_read_only(self) -> None:
+        permissions = MODULE.run_config("kimi-k3")["permission"]
+        self.assertNotIn("write", permissions)
+        self.assertNotIn("gh pr comment*", permissions["bash"])
+
+    def test_comment_grants_exactly_one_gh_verb(self) -> None:
+        # Not `gh*`: that reaches `gh api`, which POSTs anywhere on github.com, and
+        # `gh auth token`, which prints the credential into the transcript.
+        bash = MODULE.run_config("kimi-k3", capabilities=["comment"])["permission"]["bash"]
+        self.assertEqual(bash["gh pr comment*"], "allow")
+        self.assertEqual(bash["*"], "deny")
+        for reachable in ("gh*", "gh api*", "gh auth*", "curl*"):
+            self.assertNotIn(reachable, bash)
+
+    def test_deny_by_default_survives_every_capability(self) -> None:
+        for name in MODULE.CAPABILITIES:
+            with self.subTest(name):
+                self.assertEqual(MODULE.run_config("kimi-k3", capabilities=[name])["permission"]["*"], "deny")
+
+    def test_granting_also_advertises(self) -> None:
+        # The half that is easy to forget. A permission with no prompt fragment is a
+        # capability the model never learns it has; a fragment with no permission is one it
+        # will confidently try and fail to use.
+        for name, capability in MODULE.CAPABILITIES.items():
+            with self.subTest(name):
+                self.assertTrue(capability["permission"], f"{name} grants nothing")
+                self.assertTrue(capability["prompt"].strip(), f"{name} is never advertised")
+
+    def test_an_unknown_capability_is_refused_not_ignored(self) -> None:
+        # Silently dropping it would produce a run that looks granted and is not — which is
+        # the safe direction only by luck. Fail loudly instead.
+        with self.assertRaises(SystemExit):
+            MODULE.run_config("kimi-k3", capabilities=["push"])
+
+    def test_the_fragment_names_the_only_command_that_works(self) -> None:
+        fragment = MODULE.CAPABILITIES["comment"]["prompt"]
+        self.assertIn("gh pr comment", fragment)
+        self.assertIn("--body-file", fragment)
 
 
 class OutcomeTests(unittest.TestCase):

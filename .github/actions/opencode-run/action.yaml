@@ -40,6 +40,27 @@ inputs:
       steps too. On expiry the run is interrupted and whatever it produced is still reported.
     required: false
     default: "900"
+  capabilities:
+    description: >-
+      Comma-separated named capabilities to grant, e.g. `comment`. Empty means read-only,
+      which is the default and the right answer for anything reading untrusted content.
+      A capability ships its own permission AND its own prompt fragment, so the model is told
+      what it may do by the same thing that lets it — but advertising is never granting, and
+      an unknown name is refused rather than ignored.
+
+      `comment` gives the agent a GitHub credential and lets it DECIDE, mid-run, to write to
+      the pull request. The diff it is reading is untrusted and a model cannot reliably tell
+      that input from its instructions, so the token's `permissions:` block becomes the only
+      boundary left. Grant it where the input is trusted; never alongside `contents: write`.
+    required: false
+    default: ""
+  github-token:
+    description: >-
+      Credential for the granted capabilities. Required if `capabilities` is non-empty, and
+      it should be the narrowest token that works — `pull-requests: write` and nothing more.
+      Absent by default: a run with no capabilities must not be handed one.
+    required: false
+    default: ""
   title:
     description: Session title. Cosmetic; kept short so it never becomes a second prompt.
     required: false
@@ -113,6 +134,10 @@ runs:
         INPUT_MODEL: ${{ inputs.model }}
         INPUT_PROVIDER_ID: ${{ inputs.provider-id }}
         INPUT_GATEWAY_URL: ${{ inputs.gateway-url }}
+        INPUT_CAPABILITIES: ${{ inputs.capabilities }}
+        # Only so `prepare` can refuse a capability with no credential behind it. The value
+        # is not written anywhere it generates.
+        GH_TOKEN: ${{ inputs.github-token }}
       run: python3 "${{ github.action_path }}/opencode_run.py" prepare
 
     # The published binary, straight from the release CDN. Measured on the ARC fleet:
@@ -187,6 +212,9 @@ runs:
         TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
         # The name the generated provider block dereferences as `{env:…}`.
         OPENCODE_GATEWAY_API_KEY: ${{ inputs.api-key }}
+        # Reachable by the agent's shell — that is the point of a capability, and the reason
+        # `capabilities` is a named list rather than a boolean. Empty unless one was granted.
+        GH_TOKEN: ${{ inputs.github-token }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -uo pipefail

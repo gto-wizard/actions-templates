@@ -68,13 +68,14 @@ RUN_AGENT = "gto-run"
 # rather than quietly ineffective.
 FORBIDDEN_CONFIG_PATHS = ("opencode.json", "opencode.jsonc", ".opencode")
 
-# Read-only, deny-by-default, and NOT an input.
+# Deny-by-default, and NOT a free-form input. Anything beyond this comes from a NAMED
+# capability below, never from a caller-supplied permission blob: a generic escape hatch is
+# flipped in a workflow nobody reads closely, whereas a capability has to be added here, with
+# its own review, its own prompt fragment and its own blast radius written down.
 #
-# A write-capable agent in CI is a different security decision from "run a prompt", and
-# making it a toggle invites it to be flipped in a workflow nobody reviews closely. `bash` is
-# an allowlist of read-only git verbs, so an instruction injected through the repository
-# cannot reach `git push`, and `webfetch`/`websearch` cannot carry what was read back out.
-# `task` stays denied because a subagent escapes the turn budget, not because it is unsafe.
+# `bash` is an allowlist of read-only git verbs, so an instruction injected through the
+# repository cannot reach `git push`, and `webfetch`/`websearch` cannot carry what was read
+# back out. `task` stays denied because a subagent escapes the turn budget.
 READ_ONLY_PERMISSIONS: dict[str, Any] = {
     "*": "deny",
     "read": "allow",
@@ -92,6 +93,83 @@ READ_ONLY_PERMISSIONS: dict[str, Any] = {
         "git rev-parse*": "allow",
     },
 }
+
+# --- capabilities -------------------------------------------------------------------------
+#
+# A capability is one bundle of three things that MUST ship together: the permission that
+# grants it, the prompt fragment that tells the model it exists, and (where there is one) the
+# executor that performs it. Splitting them is how a model ends up confidently emitting
+# something nothing executes, or -- far worse -- how an executor accepts something the prompt
+# never advertised, which is a hole an injected instruction can walk through.
+#
+# The asymmetry that keeps this safe: ADVERTISING IS NOT GRANTING. The permission block is the
+# grant; the fragment is documentation. Advertised-but-not-permitted fails closed. The reverse
+# does not, which is why there is no "allow whatever the caller asks for" path.
+#
+# `comment` hands the agent a real credential and lets it decide, mid-run, to write to the
+# pull request. That is a genuinely different trust model from every other run: the diff it is
+# reading is untrusted, the model cannot reliably tell that input from its instructions, and
+# the token's `permissions:` block is the only remaining boundary. Grant it only where the
+# input is trusted, and never together with `contents: write`.
+CAPABILITIES: dict[str, dict[str, Any]] = {
+    "comment": {
+        "permission": {
+            # Not `gh*`: that would reach `gh api`, which can POST anywhere on github.com,
+            # and `gh auth token`, which prints the credential straight into the transcript.
+            "bash": {"gh pr comment*": "allow"},
+            # So it can put a long markdown body in a file rather than quoting it through a
+            # shell. Writes land in an ephemeral workspace that nothing pushes.
+            "write": "allow",
+            "edit": "allow",
+        },
+        "prompt": (
+            "You can post a comment to the pull request you are reading, once, by running:\n"
+            "\n"
+            "    gh pr comment <number> --repo <owner/repo> --body-file <path>\n"
+            "\n"
+            "Write the body to a file first and pass it with --body-file; do not try to quote a\n"
+            "long markdown body on the command line. No other `gh` subcommand is available to\n"
+            "you, and there is no network access beyond that one command.\n"
+            "\n"
+            "Post exactly one comment, and only when you have something to say. If the command\n"
+            "fails, say so in your final answer rather than retrying it repeatedly."
+        ),
+    }
+}
+
+
+def capability_bundle(names: list[str]) -> tuple[dict[str, Any], str]:
+    """Merge the named capabilities into one permission overlay and one prompt appendix."""
+    permission: dict[str, Any] = {}
+    fragments: list[str] = []
+    for name in names:
+        capability = CAPABILITIES.get(name)
+        if capability is None:
+            raise SystemExit(
+                f"::error title=Unknown capability::{name!r} is not one of {', '.join(CAPABILITIES)}"
+            )
+        for key, value in capability["permission"].items():
+            if isinstance(value, dict):
+                merged = dict(permission.get(key) or {})
+                merged.update(value)
+                permission[key] = merged
+            else:
+                permission[key] = value
+        fragments.append(capability["prompt"])
+    return permission, "\n\n".join(fragments)
+
+
+def permissions_for(names: list[str]) -> dict[str, Any]:
+    """Read-only, plus whatever the named capabilities add. `*: deny` always survives."""
+    overlay, _ = capability_bundle(names)
+    permissions = {key: (dict(value) if isinstance(value, dict) else value) for key, value in READ_ONLY_PERMISSIONS.items()}
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(permissions.get(key), dict):
+            permissions[key].update(value)
+        else:
+            permissions[key] = value
+    return permissions
+
 
 TIMEOUT_EXIT_CODE = 124  # `timeout` says so
 
@@ -131,8 +209,10 @@ def run_config(
     gateway_url: str = DEFAULT_GATEWAY_URL,
     api_key_env: str = API_KEY_ENV,
     run_id: object = "",
+    capabilities: list[str] | None = None,
 ) -> dict[str, Any]:
-    """The inline opencode config for one read-only run."""
+    """The inline opencode config for one run, read-only unless a capability widens it."""
+    permissions = permissions_for(capabilities or [])
     alias = f"{provider_id}/{model}"
     # Every request carries the run id, so the gateway's spend log can be split by run
     # instead of pooling into one anonymous `User-Agent: opencode` bucket.
@@ -155,13 +235,13 @@ def run_config(
                 "models": {model: {"name": f"{model} ({provider_id})"}},
             }
         },
-        "permission": READ_ONLY_PERMISSIONS,
+        "permission": permissions,
         "agent": {
             RUN_AGENT: {
-                "description": "Read-only LLM run for CI.",
+                "description": "LLM run for CI.",
                 "mode": "primary",
                 "model": alias,
-                "permission": READ_ONLY_PERMISSIONS,
+                "permission": permissions,
             }
         },
         "share": "disabled",
@@ -331,6 +411,16 @@ def prepare() -> int:
         print("::error title=No prompt::this runner has no built-in instructions; pass `prompt`", flush=True)
         return 2
 
+    capabilities = [name.strip() for name in env("INPUT_CAPABILITIES").split(",") if name.strip()]
+    if capabilities and not os.environ.get("GH_TOKEN", "").strip():
+        print("::error title=Capability without a credential::`comment` needs `github-token`", flush=True)
+        return 2
+    _, appendix = capability_bundle(capabilities)
+    if appendix:
+        # Appended AFTER the caller's instruction so the capability reads as an affordance
+        # rather than as the task. The task is what the consuming repository asked for.
+        prompt = f"{prompt.rstrip()}\n\n{appendix}\n"
+
     model = env("INPUT_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL
     provider_id = env("INPUT_PROVIDER_ID", DEFAULT_PROVIDER_ID) or DEFAULT_PROVIDER_ID
     gateway_url = env("INPUT_GATEWAY_URL", DEFAULT_GATEWAY_URL) or DEFAULT_GATEWAY_URL
@@ -346,6 +436,7 @@ def prepare() -> int:
         provider_id=provider_id,
         gateway_url=gateway_url,
         run_id=env("GITHUB_RUN_ID"),
+        capabilities=capabilities,
     )
     config_file = artifact_dir / "opencode-config.json"
     config_file.write_text(json.dumps(config, indent=2), encoding="utf-8")
