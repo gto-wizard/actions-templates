@@ -1,0 +1,246 @@
+name: Run opencode
+description: >-
+  Run one read-only opencode session against the LLM gateway with a prompt you supply, and
+  report how it ended. Knows nothing about pull requests, reviews or comments -- compose it
+  with `report-agent-run` for telemetry and with a task layer for meaning.
+
+inputs:
+  prompt:
+    description: >-
+      The instruction, in full. There is no built-in prompt: this action is a binary wrapper,
+      and what to ask for belongs to the repository that is asking.
+    required: true
+  api-key:
+    description: >-
+      Virtual key for the gateway, e.g. a LiteLLM key. Passed to the run as an env var the
+      generated config dereferences, so no config file ever contains a credential.
+    required: true
+  model:
+    description: Model id as the gateway serves it — kimi-k3, glm-5.2, qwen3.8-max, deepseek-v4-pro.
+    required: false
+    default: kimi-k3
+  gateway-url:
+    description: OpenAI-compatible base URL, including any /v1 suffix.
+    required: false
+    default: https://llm.gtowiz.com/v1
+  provider-id:
+    description: Provider name in the generated config; also the model alias prefix.
+    required: false
+    default: gtowizard
+  opencode-version:
+    description: >-
+      Pinned CLI version. `latest` would silently change the runner, and the JSON event
+      stream this action parses is not a stable interface.
+    required: false
+    default: 1.18.16
+  timeout-seconds:
+    description: >-
+      Hard bound on the run. opencode documents no step, iteration, or tool-call limit, so
+      without this the only bound is the caller's job timeout — which kills the reporting
+      steps too. On expiry the run is interrupted and whatever it produced is still reported.
+    required: false
+    default: "900"
+  title:
+    description: Session title. Cosmetic; kept short so it never becomes a second prompt.
+    required: false
+    default: CI run
+  python-version:
+    description: Provision this Python before running. Empty uses whatever the runner has.
+    required: false
+    default: ""
+
+outputs:
+  status:
+    description: >-
+      How the RUN ended — success, error, timeout, cancelled or rejected. Never `unusable`:
+      whether the ANSWER was any good is a contract judgement, and the contract belongs to
+      whatever asked for the run.
+    value: ${{ steps.collect.outputs.status }}
+  success:
+    description: "`true` only when status is success."
+    value: ${{ steps.collect.outputs.success }}
+  exit-code:
+    description: The CLI's exit code, or empty when the step was killed before writing one.
+    value: ${{ steps.collect.outputs.exit-code }}
+  text-file:
+    description: >-
+      Path to the model's text, every part in arrival order. A file rather than an output
+      value: answers routinely exceed what `$GITHUB_OUTPUT` will carry, and a model that
+      happens to emit a heredoc delimiter would corrupt the step's whole output file.
+    value: ${{ steps.collect.outputs.text-file }}
+  text-bytes:
+    description: Size of that file, for a caller that wants to notice an empty answer.
+    value: ${{ steps.collect.outputs.text-bytes }}
+  events-file:
+    description: Path to the raw opencode JSONL event stream.
+    value: ${{ steps.collect.outputs.events-file }}
+  duration-seconds:
+    description: Wall-clock seconds the CLI ran.
+    value: ${{ steps.run.outputs.duration-seconds }}
+  tokens:
+    description: JSON object — input, output, reasoning, cache_read, cache_write, total.
+    value: ${{ steps.collect.outputs.tokens }}
+  steps:
+    description: How many model steps finished.
+    value: ${{ steps.collect.outputs.steps }}
+  tool-calls:
+    description: How many tool calls the run made.
+    value: ${{ steps.collect.outputs.tool-calls }}
+  tool-histogram:
+    description: "`read x9, grep x6` — how the run spent its steps."
+    value: ${{ steps.collect.outputs.tool-histogram }}
+  session-id:
+    description: opencode's own session id.
+    value: ${{ steps.collect.outputs.session-id }}
+  model:
+    description: The model id this run used, as the gateway serves it.
+    value: ${{ steps.prepare.outputs.model }}
+
+runs:
+  using: composite
+  steps:
+    - name: Provision Python for this action
+      if: inputs.python-version != ''
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # pin@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Prepare the run
+      id: prepare
+      shell: bash
+      env:
+        INPUT_PROMPT: ${{ inputs.prompt }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_PROVIDER_ID: ${{ inputs.provider-id }}
+        INPUT_GATEWAY_URL: ${{ inputs.gateway-url }}
+      run: python3 "${{ github.action_path }}/opencode_run.py" prepare
+
+    # The published binary, straight from the release CDN. Measured on the ARC fleet:
+    #
+    #   curl | bash installer      69s, or a connection reset at 0.53s
+    #   docker pull from ghcr.io    2.8s
+    #   this release asset         0.42s for all 60MB
+    #
+    # The installer was never the right primitive: `opencode.ai/install` is a 307 to
+    # raw.githubusercontent.com, which rate-limits per IP, and every runner in a fan-out
+    # shares one NAT egress. Release assets come from release-assets.githubusercontent.com,
+    # which is built for exactly this. Do not "optimize" this into a cache without
+    # re-measuring: restoring 60MB from the Actions cache costs more than 0.42s of download.
+    - name: Install the pinned opencode CLI
+      id: cli
+      shell: bash
+      env:
+        VERSION: ${{ inputs.opencode-version }}
+        CLI_DIR: ${{ runner.temp }}/opencode-cli
+      run: |
+        set -euo pipefail
+        case "$RUNNER_ARCH" in
+          X64) arch=x64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "::error::unsupported runner architecture $RUNNER_ARCH"; exit 1 ;;
+        esac
+        case "$RUNNER_OS" in
+          Linux)
+            os=linux
+            extension=tar.gz
+            # The release ships glibc and musl builds as separate assets. Ask the runner which
+            # it is rather than assuming Ubuntu: an Alpine-based fleet would silently get a
+            # binary that cannot exec.
+            if ldd --version 2>&1 | grep -qi musl; then libc=-musl; else libc=""; fi
+            ;;
+          macOS) os=darwin; extension=zip; libc="" ;;
+          *) echo "::error::unsupported runner OS $RUNNER_OS"; exit 1 ;;
+        esac
+        asset="opencode-${os}-${arch}${libc}.${extension}"
+        url="https://github.com/anomalyco/opencode/releases/download/v${VERSION}/${asset}"
+        mkdir -p "$CLI_DIR"
+        echo "Fetching $asset"
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 15 \
+          -o "$CLI_DIR/$asset" "$url"
+        case "$extension" in
+          tar.gz) tar -xzf "$CLI_DIR/$asset" -C "$CLI_DIR" ;;
+          zip) unzip -qo "$CLI_DIR/$asset" -d "$CLI_DIR" ;;
+        esac
+        rm -f "$CLI_DIR/$asset"
+        binary="$(find "$CLI_DIR" -maxdepth 3 -type f -name opencode -print -quit)"
+        [ -n "$binary" ] || { echo "::error::no opencode binary inside $asset"; exit 1; }
+        chmod +x "$binary"
+        echo "bin-dir=$(dirname "$binary")" >> "$GITHUB_OUTPUT"
+        "$binary" --version
+
+    # `continue-on-error` does not exist for composite steps, so the exit code is captured
+    # here and acted on by the caller. Everything after it is reporting, and reporting never
+    # decides whether the job passed.
+    - name: Run
+      id: run
+      shell: bash
+      env:
+        # The run's own HOME — config discovery and session state — separate from where the
+        # shared binary lives.
+        HOME: ${{ steps.prepare.outputs.home-dir }}
+        CLI_BIN: ${{ steps.cli.outputs.bin-dir }}
+        ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
+        PROMPT_FILE: ${{ steps.prepare.outputs.prompt-file }}
+        CONFIG_FILE: ${{ steps.prepare.outputs.config-file }}
+        MODEL_ALIAS: ${{ steps.prepare.outputs.model-alias }}
+        TITLE: ${{ inputs.title }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        # The name the generated provider block dereferences as `{env:…}`.
+        OPENCODE_GATEWAY_API_KEY: ${{ inputs.api-key }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -uo pipefail
+        # errexit OFF, deliberately. GitHub runs composite `run` steps under `bash -e`, so a
+        # non-zero pipeline aborts this step at the pipeline itself and never reaches the
+        # `exit-code` output below — after which the collector can only report "exit unknown"
+        # and fabricate a 1.
+        set +e
+        export PATH="$CLI_BIN:$PATH"
+        # opencode merges config from eight sources and a repository's own `opencode.json`
+        # outranks the OPENCODE_CONFIG path. Inline content outranks the checkout, which is
+        # what keeps the tree being read from configuring the agent reading it.
+        OPENCODE_CONFIG_CONTENT="$(cat "$CONFIG_FILE")"
+        export OPENCODE_CONFIG_CONTENT
+        # An empty config is the one failure that looks like success: opencode would fall back
+        # to its default agent, its own provider list and NO permission restrictions, then run
+        # away. Fail here instead.
+        [ -n "$OPENCODE_CONFIG_CONTENT" ] || { echo "::error::the generated opencode config is empty"; exit 1; }
+        [ -s "$PROMPT_FILE" ] || { echo "::error::the prompt is empty"; exit 1; }
+        EXEC_FILE="$ARTIFACT_DIR/opencode-events.jsonl"
+        echo "events-file=$EXEC_FILE" >> "$GITHUB_OUTPUT"
+        echo "Running $MODEL_ALIAS; this log shows tool names and step tokens only."
+        STARTED="$(date +%s)"
+        # `--pure` refuses `.opencode/plugin` code from the checkout. `--title` skips
+        # opencode's own title-generation request, which would spend a second call naming a
+        # session nobody opens.
+        timeout --signal=INT "$TIMEOUT_SECONDS" \
+          opencode run \
+            --format json \
+            --pure \
+            --print-logs --log-level WARN \
+            --agent gto-run \
+            --model "$MODEL_ALIAS" \
+            --title "$TITLE" \
+            "$(cat "$PROMPT_FILE")" \
+          | tee "$EXEC_FILE" \
+          | python3 "$ACTION_PATH/opencode_run.py" render-stream
+        STATUS="${PIPESTATUS[0]}"
+        if [ "$STATUS" = "124" ]; then
+          echo "::warning title=opencode run timed out::stopped after ${TIMEOUT_SECONDS}s; the partial stream is still reported"
+        fi
+        echo "exit-code=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "duration-seconds=$(( $(date +%s) - STARTED ))" >> "$GITHUB_OUTPUT"
+
+    - name: Collect the outcome
+      id: collect
+      if: always() && steps.prepare.outputs.artifact-dir != ''
+      shell: bash
+      env:
+        INPUT_ARTIFACT_DIR: ${{ steps.prepare.outputs.artifact-dir }}
+        INPUT_EVENTS_FILE: ${{ steps.run.outputs.events-file }}
+        # Deliberately NOT defaulted: empty is the signal that the run step was killed before
+        # it could write one, which is what a cancellation looks like from here. `cancelled()`
+        # is not available to a composite action — using it made GitHub reject a whole action
+        # file with "Unrecognized function", failing every job at "Set up job".
+        INPUT_EXIT_CODE: ${{ steps.run.outputs.exit-code }}
+      run: python3 "${{ github.action_path }}/opencode_run.py" collect
