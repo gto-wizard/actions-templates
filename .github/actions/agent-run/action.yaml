@@ -1,0 +1,256 @@
+name: Run an agent CLI
+description: >-
+  Run one agent CLI session — Claude Code or opencode — through the gto-agent-sdk binaries,
+  with OpenTelemetry configured and the outcome classified. Knows nothing about pull requests,
+  reviews or comments: compose it with `report-agent-run` for telemetry and with a task layer
+  for meaning.
+
+inputs:
+  agent:
+    description: >-
+      Which CLI to run: `claude` or `opencode`. One action rather than two because the two
+      binaries share a core — the outcome vocabulary, the attribution and the answer contract
+      are the same thing on both, and splitting them would let the pair drift.
+    required: true
+  sdk-version:
+    description: >-
+      Pinned gto-agent-sdk version, e.g. `0.2.0` — the number, without the `gto-agent-sdk-v`
+      prefix. No default and no `latest`: the summary JSON this action reads is an interface,
+      and a floating version would change the runner under a caller who did not ask.
+    required: true
+  prompt:
+    description: The instruction, in full. Mutually exclusive with `prompt-file`.
+    required: false
+    default: ""
+  prompt-file:
+    description: Path to a file holding the instruction. Preferred for anything long.
+    required: false
+    default: ""
+  args:
+    description: >-
+      Extra argv handed to the underlying CLI verbatim, after `--`. This action composes no
+      flags of its own into it — a wrapper that rewrote argv is what broke `--resume` on five
+      consecutive runs, and passing through untouched is the property the binary exists for.
+    required: false
+    default: ""
+  model:
+    description: Model id as the gateway serves it. Empty leaves the CLI's own default.
+    required: false
+    default: ""
+  timeout:
+    description: >-
+      Hard bound on the run, as a Go duration (`15m`). On expiry the child's process group is
+      signalled, given a grace period to flush its exporter, then killed — so a timed-out run
+      still reports.
+    required: false
+    default: 15m
+  api-key:
+    description: Gateway virtual key. Reaches the CLI as an env var; never written to a file.
+    required: true
+  base-url:
+    description: OpenAI-compatible base URL for the gateway, including any /v1 suffix.
+    required: false
+    default: ""
+  gto-universe-token:
+    description: >-
+      Token that can read gto-universe's releases, where the binaries are published.
+      **gto-universe is private**, so this is not optional and the stock GITHUB_TOKEN of any
+      OTHER repository will not do — it is scoped to the repository it runs in and fails with
+      a 404 that reads exactly like a missing release. Inside gto-universe the default token
+      is already sufficient; elsewhere, mint a GitHub App installation token with
+      `Contents: read` on gto-universe.
+    required: true
+  task:
+    description: What this run is FOR (`review`, `summarize`, …). Becomes a telemetry label.
+    required: false
+    default: unknown
+  attribution:
+    description: >-
+      Extra OTEL_RESOURCE_ATTRIBUTES as `key=value` pairs, comma-separated — department,
+      team.id, vcs.change.ref and anything else the caller wants every signal stamped with.
+      Resource attributes become Prometheus labels only if a COLLECTOR promotes them; exported
+      straight to a remote store they are dropped, and the metric then arrives with none of its
+      attribution, which reads as missing and is not.
+    required: false
+    default: ""
+  otlp-endpoint:
+    description: OTLP base endpoint. Empty disables export, which is the right default locally.
+    required: false
+    default: ""
+
+outputs:
+  status:
+    description: One of success · error · timeout · cancelled · rejected · unusable.
+    value: ${{ steps.run.outputs.status }}
+  success:
+    description: Whether the RUN did its job — never whether the answer was any good.
+    value: ${{ steps.run.outputs.success }}
+  exit-code:
+    description: The wrapper's exit code, which describes the ENDING and is not always the child's.
+    value: ${{ steps.run.outputs.exit-code }}
+  text-file:
+    description: Path to the model's final text.
+    value: ${{ steps.run.outputs.text-file }}
+  text-bytes:
+    description: Size of that text. Zero on a refusal or a timeout, which produced no answer.
+    value: ${{ steps.run.outputs.text-bytes }}
+  end-reason:
+    description: How the CLI itself said the run ended, when it said anything.
+    value: ${{ steps.run.outputs.end-reason }}
+  transcript-file:
+    description: The raw stream the CLI printed, kept whole.
+    value: ${{ steps.run.outputs.transcript-file }}
+  session-id:
+    description: The CLI's own session id, for a later `--resume`.
+    value: ${{ steps.run.outputs.session-id }}
+  duration-seconds:
+    description: Wall clock for the run.
+    value: ${{ steps.run.outputs.duration-seconds }}
+  model:
+    description: The model the runner asked for.
+    value: ${{ steps.run.outputs.model }}
+  tokens:
+    description: >-
+      Token totals as JSON — populated ONLY for a CLI that publishes no metrics of its own.
+      Claude exports these natively with our attribution already attached, so it reports
+      nothing here rather than a second, worse copy of a series that already has an owner.
+    value: ${{ steps.run.outputs.tokens }}
+  steps:
+    description: Steps the run took. Same rule as `tokens` — stream-derived agents only.
+    value: ${{ steps.run.outputs.steps }}
+  tool-calls:
+    description: Tool invocations. Same rule as `tokens`.
+    value: ${{ steps.run.outputs.tool-calls }}
+  tools:
+    description: >-
+      Tool names in CALL ORDER, as JSON — not a formatted histogram. Presentation belongs to
+      whatever renders it, and the existing consumers format it differently.
+    value: ${{ steps.run.outputs.tools }}
+  summary-file:
+    description: The binary's own summary JSON, for anything these outputs do not surface.
+    value: ${{ steps.run.outputs.summary-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pinned gto-agent-sdk binaries
+      id: sdk
+      shell: bash
+      env:
+        VERSION: ${{ inputs.sdk-version }}
+        GH_TOKEN: ${{ inputs.gto-universe-token }}
+        SDK_DIR: ${{ runner.temp }}/gto-agent-sdk
+      run: |
+        set -euo pipefail
+        # A release asset, not an installer. Measured on the ARC fleet: `curl | bash` took 69s
+        # or reset the connection outright, while an asset took 0.42s for 60MB — installers
+        # redirect to raw.githubusercontent.com, which rate-limits per IP, and every runner in
+        # a fan-out shares one NAT egress.
+        case "$RUNNER_OS" in
+          Linux) os=linux ;;
+          macOS) os=darwin ;;
+          *) echo "::error::gto-agent-sdk ships linux and darwin only, not $RUNNER_OS"; exit 1 ;;
+        esac
+        case "$RUNNER_ARCH" in
+          X64) arch=amd64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "::error::unsupported runner architecture $RUNNER_ARCH"; exit 1 ;;
+        esac
+        asset="gto-agent-sdk_${os}_${arch}.tar.gz"
+        mkdir -p "$SDK_DIR"
+        cd "$SDK_DIR"
+
+        if ! gh release download "gto-agent-sdk-v${VERSION}" \
+               --repo gto-wizard/gto-universe -p "$asset" -p checksums.txt --clobber 2>/tmp/dlerr; then
+          # The failure worth naming: gto-universe is private, so a token without Contents:read
+          # gets a 404 that is indistinguishable from a version that does not exist.
+          echo "::error::could not download gto-agent-sdk-v${VERSION} ($asset). If the token lacks Contents:read on gto-universe this reads as a missing release: $(cat /tmp/dlerr)"
+          exit 1
+        fi
+
+        # Verified, not trusted: this fetches an executable over the network and then runs it.
+        grep " ${asset}\$" checksums.txt > expected.txt
+        sha256sum -c expected.txt 2>/dev/null || shasum -a 256 -c expected.txt
+        tar -xzf "$asset"
+        echo "$SDK_DIR" >> "$GITHUB_PATH"
+        ./gto-claude --version
+        ./gto-opencode --version
+
+    - name: Run
+      id: run
+      shell: bash
+      env:
+        AGENT: ${{ inputs.agent }}
+        PROMPT: ${{ inputs.prompt }}
+        PROMPT_FILE: ${{ inputs.prompt-file }}
+        EXTRA_ARGS: ${{ inputs.args }}
+        MODEL: ${{ inputs.model }}
+        TIMEOUT: ${{ inputs.timeout }}
+        GTO_TASK: ${{ inputs.task }}
+        GTO_OTLP_ENDPOINT: ${{ inputs.otlp-endpoint }}
+        OTEL_RESOURCE_ATTRIBUTES: ${{ inputs.attribution }}
+        ANTHROPIC_API_KEY: ${{ inputs.api-key }}
+        ANTHROPIC_BASE_URL: ${{ inputs.base-url }}
+        OPENCODE_API_KEY: ${{ inputs.api-key }}
+        OPENCODE_BASE_URL: ${{ inputs.base-url }}
+        SDK_DIR: ${{ runner.temp }}/gto-agent-sdk
+        GTO_OUT_DIR: ${{ runner.temp }}/agent-run
+      run: |
+        set -uo pipefail
+        case "$AGENT" in
+          claude)   bin=gto-claude ;;
+          opencode) bin=gto-opencode ;;
+          # Refused rather than defaulted: silently running the wrong CLI would produce a
+          # plausible run under the wrong telemetry identity.
+          *) echo "::error::agent must be 'claude' or 'opencode', got '${AGENT}'"; exit 1 ;;
+        esac
+        if [ -n "$PROMPT" ] && [ -n "$PROMPT_FILE" ]; then
+          echo "::error::pass prompt OR prompt-file, not both"; exit 1
+        fi
+        if [ -z "$PROMPT" ] && [ -z "$PROMPT_FILE" ]; then
+          echo "::error::one of prompt or prompt-file is required"; exit 1
+        fi
+
+        mkdir -p "$GTO_OUT_DIR"
+        args=(--timeout "$TIMEOUT")
+        [ -n "$PROMPT_FILE" ] && args+=(--prompt-file "$PROMPT_FILE") || args+=(--prompt "$PROMPT")
+        [ -n "$MODEL" ] && args+=(--model "$MODEL")
+        # Everything after `--` reaches the CLI untouched.
+        # shellcheck disable=SC2206
+        [ -n "$EXTRA_ARGS" ] && args+=(-- $EXTRA_ARGS)
+
+        "$SDK_DIR/$bin" "${args[@]}"
+        rc=$?
+
+        summary="$GTO_OUT_DIR/summary.json"
+        # The binary is the ONE place a run's outcome is decided; this step only maps its
+        # summary onto step outputs. Re-deriving any of it here would be a second opinion
+        # about the same run, and the two would eventually disagree.
+        if [ ! -f "$summary" ]; then
+          echo "::error::the runner produced no summary at $summary (exit $rc)"
+          echo "status=error" >> "$GITHUB_OUTPUT"
+          echo "success=false" >> "$GITHUB_OUTPUT"
+          echo "exit-code=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+        fi
+
+        # status, success, exit-code, duration-seconds, transcript-file, text-file,
+        # text-bytes, end-reason and session-id are written by the BINARY ITSELF into
+        # $GITHUB_OUTPUT — it is handed the file and emits them with delimiter-safe quoting.
+        # This step must not restate them: two writers of one key is how an action starts
+        # reporting a different outcome than the runner it wraps, and the binary is the one
+        # place a run's outcome is decided.
+        #
+        # Only what the binary does not publish is mapped here, out of its own summary.
+        emit() { printf '%s=%s\n' "$1" "$(jq -rc --arg d "$3" "$2 // \$d" "$summary")" >> "$GITHUB_OUTPUT"; }
+        emit model       .model       ""
+        emit tokens      .tokens      "{}"
+        emit steps       .steps       0
+        emit tool-calls  .tool_calls  0
+        emit tools       .tools       "[]"
+        echo "summary-file=$summary" >> "$GITHUB_OUTPUT"
+
+        # The wrapper's exit code describes the ENDING, and the caller decides what to do
+        # about it — a `cancelled` run is not a failure, and failing the step here would
+        # manufacture one on every re-push.
+        exit 0
