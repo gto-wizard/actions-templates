@@ -1,8 +1,9 @@
 name: Set up the gto-agent-sdk toolchain
 description: >-
-  Put the pinned gto-agent-sdk binaries and the agent CLIs they drive on PATH, with the CLI
-  download cached. Runs nothing: the caller invokes `gto-claude` or `gto-opencode` itself, in a
-  plain `run:` step, with argv it controls.
+  Put the pinned gto-agent-sdk binaries, the agent CLIs they drive, and the PATH toolchain an
+  agent task expects — language servers, `rtk`, cocoindex's `ccc` — on PATH, with the CLI
+  download cached. Runs no AGENT: the caller invokes `gto-claude` or `gto-opencode` itself, in
+  a plain `run:` step, with argv it controls.
 
 # WHY THIS IS SETUP AND NOT A RUNNER.
 #
@@ -44,6 +45,24 @@ inputs:
     required: false
     default: "true"
 
+  install-toolchain:
+    description: >-
+      Whether to run `gto-claude install` — the language servers, `rtk` and cocoindex's `ccc`.
+      On by default, because a reviewer without an LSP silently degrades to grep and one
+      without `ccc` cannot do the semantic search the substrate makes its mandatory first move
+      for locating code, and neither degradation is visible in the review it produces.
+
+      This is the PATH half only. The HOME half (`gto-claude setup` — plugin marketplace, LSP
+      plugins, `rtk init`, the ccc skill and MCP registration) is deliberately NOT run here:
+      it writes to the agent's HOME, which only the caller knows, and in a workspace whose
+      HOME is the checkout it would write into tracked files and dirty the tree the agent is
+      about to review. Callers that need it run `gto-claude setup` themselves, in a step where
+      HOME is already what the agent will use.
+
+      Requires an sdk-version of 0.8.0 or newer; `install` did not exist before it.
+    required: false
+    default: "true"
+
 outputs:
   sdk-dir:
     description: Directory holding gto-claude and gto-opencode. Already on PATH.
@@ -60,6 +79,9 @@ outputs:
   cache-hit:
     description: Whether the agent CLIs came from cache.
     value: ${{ steps.cli-cache.outputs.cache-hit }}
+  toolchain-installed:
+    description: Whether the PATH toolchain (language servers, rtk, ccc) was provisioned.
+    value: ${{ steps.toolchain.outputs.ran }}
 
 runs:
   using: composite
@@ -163,6 +185,23 @@ runs:
         "$SDK_DIR/gto-claude"   ensure-cli --dir "$CLI_DIR"
         "$SDK_DIR/gto-opencode" ensure-cli --dir "$CLI_DIR"
         echo "$CLI_DIR" >> "$GITHUB_PATH"
+
+    # The PATH half of provisioning. AFTER the CLIs, because `install` is a subcommand of the
+    # wrapper, and before the verify so a failure here is attributed to the right step.
+    #
+    # NOT continue-on-error. A reviewer that ran without an LSP or without semantic search
+    # produces a review that looks exactly like a thorough one and is not, so a half-
+    # provisioned box should stop the job rather than quietly hand back a weaker review.
+    - name: Install the PATH toolchain
+      id: toolchain
+      if: inputs.install-toolchain == 'true'
+      shell: bash
+      env:
+        SDK_DIR: ${{ steps.sdk.outputs.dir }}
+      run: |
+        set -euo pipefail
+        "$SDK_DIR/gto-claude" install
+        echo "ran=true" >> "$GITHUB_OUTPUT"
 
     - name: Verify what landed
       shell: bash
