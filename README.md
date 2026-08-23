@@ -286,6 +286,58 @@ before it writes one — so it is passed in separately. That matters because
 without the distinction each push would manufacture a fake "this model cannot answer"
 data point.
 
+### `setup-gto-agent-sdk`
+
+Puts the pinned `gto-agent-sdk` binaries and the agent CLIs they drive on `PATH`, with the
+CLI download cached. It runs nothing — you invoke `gto-claude` or `gto-opencode` yourself,
+in a plain `run:` step, with argv you control.
+
+```yaml
+- uses: gto-wizard/actions-templates/.github/actions/setup-gto-agent-sdk@<full-commit-sha>
+  with:
+    sdk-version: "0.4.0"
+    # gto-universe is PRIVATE. Inside it the default token suffices; from any other
+    # repository this must be a GitHub App token with Contents:read, or the download
+    # 404s in a way that reads exactly like a missing release.
+    gto-universe-token: ${{ github.token }}
+
+- name: Review
+  id: review
+  continue-on-error: true          # a `cancelled` ending is data, not a failure
+  env:
+    ANTHROPIC_API_KEY: ${{ secrets.REVIEW_KEY }}
+    ANTHROPIC_BASE_URL: https://llm.gtowiz.com
+  run: |
+    gto-claude --prompt-file "$RUNNER_TEMP/review.md" \
+      --model sonnet --timeout 30m \
+      -- --max-turns 60 --allowedTools 'Bash(gh *),Read,Write,Agent'
+```
+
+**Why you call the CLI yourself.** The binary already writes its own step outputs into
+`$GITHUB_OUTPUT` — `status`, `success`, `exit-code`, `duration-seconds`, `transcript-file`,
+`text-file`, `text-bytes`, `end-reason`, `session-id` — and its own report into
+`$GITHUB_STEP_SUMMARY`. Invoking it directly keeps all of that AND lets you write argv
+directly. Its predecessor `agent-run` took argv as an input and expanded it unquoted, so
+`Bash(gh *)` word-split into `Bash(gh` and `*)` and the run used a different tool allowlist
+than the one written down.
+
+**The CLI versions are asked of the binary, never written here.** The pin is a property of
+the SDK build — it is what that build's event-stream parser was written against. A version
+named in your workflow would be a second answer to one question, and the cache key would go
+on matching after the SDK moved, serving a stale CLI to a parser expecting a new one. Read
+them from the outputs if you need them:
+
+| Output | What |
+| --- | --- |
+| `sdk-dir` / `cli-dir` | where each landed; both already on `PATH` |
+| `claude-cli-version` / `opencode-cli-version` | the versions this SDK build pins |
+| `cache-hit` | whether the CLIs came from cache |
+
+**The cache is not about the seconds** (~31s cold: 26.3s for claude's 294MB binary, 4.6s for
+opencode). `claude.ai/install.sh` is rate-limited per source IP — which is why its installer
+already retries five times — and every runner behind one NAT egress shares that limit. Set
+`cache: "false"` to opt out.
+
 ### `gateway-spend-export`
 
 What the LLM gateway **actually billed** for each agent run, republished as

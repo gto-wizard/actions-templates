@@ -1,0 +1,184 @@
+name: Set up the gto-agent-sdk toolchain
+description: >-
+  Put the pinned gto-agent-sdk binaries and the agent CLIs they drive on PATH, with the CLI
+  download cached. Runs nothing: the caller invokes `gto-claude` or `gto-opencode` itself, in a
+  plain `run:` step, with argv it controls.
+
+# WHY THIS IS SETUP AND NOT A RUNNER.
+#
+# It replaces `agent-run`, which both provisioned the toolchain AND invoked the CLI. Wrapping
+# the invocation bought almost nothing and cost the one thing a caller most needs:
+#
+#   - The binary already writes its own step outputs into $GITHUB_OUTPUT (status, success,
+#     exit-code, duration-seconds, transcript-file, text-file, text-bytes, end-reason,
+#     session-id) and its own report into $GITHUB_STEP_SUMMARY. A caller invoking it directly
+#     keeps ALL of that. The wrapper's remaining contribution was five `jq` lines.
+#   - Passing argv THROUGH a wrapper is what broke it. `agent-run` expanded its `args` input
+#     unquoted, so `Bash(gh *)` word-split into `Bash(gh` and `*)` and the reviewer silently
+#     ran with a different tool allowlist than the one written down. The workaround was to
+#     spell permissions without spaces. In a `run:` step the caller writes argv directly and
+#     the entire class is gone.
+#
+# So: this action provisions, and stops. What to run, with which flags, is the caller's.
+
+inputs:
+  sdk-version:
+    description: >-
+      Pinned gto-agent-sdk version, e.g. `0.4.0` — the number, without the `gto-agent-sdk-v`
+      prefix. No default and no `latest`: the summary JSON and the step outputs are an
+      interface, and a floating version would change the runner under a caller who did not ask.
+    required: true
+  gto-universe-token:
+    description: >-
+      Token that can read gto-universe's releases, where the binaries are published.
+      **gto-universe is private**, so this is not optional, and the stock GITHUB_TOKEN of any
+      OTHER repository will not do — it is scoped to the repository it runs in and fails with a
+      404 that reads exactly like a missing release. Inside gto-universe the default token is
+      already sufficient; elsewhere, mint a GitHub App installation token with Contents:read.
+    required: true
+  cache:
+    description: >-
+      Whether to cache the agent CLI download. On by default and rarely worth turning off — the
+      point of the cache is not the ~31s, it is that claude.ai/install.sh is rate-limited per
+      source IP and every runner behind one NAT egress shares that limit.
+    required: false
+    default: "true"
+
+outputs:
+  sdk-dir:
+    description: Directory holding gto-claude and gto-opencode. Already on PATH.
+    value: ${{ steps.sdk.outputs.dir }}
+  cli-dir:
+    description: Directory holding the agent CLIs. Already on PATH.
+    value: ${{ steps.plan.outputs.dir }}
+  claude-cli-version:
+    description: Claude Code version this SDK build pins.
+    value: ${{ steps.plan.outputs.claude }}
+  opencode-cli-version:
+    description: opencode version this SDK build pins.
+    value: ${{ steps.plan.outputs.opencode }}
+  cache-hit:
+    description: Whether the agent CLIs came from cache.
+    value: ${{ steps.cli-cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pinned gto-agent-sdk binaries
+      id: sdk
+      shell: bash
+      env:
+        VERSION: ${{ inputs.sdk-version }}
+        GH_TOKEN: ${{ inputs.gto-universe-token }}
+        SDK_DIR: ${{ runner.temp }}/gto-agent-sdk
+      run: |
+        set -euo pipefail
+        # A release asset, not an installer. Measured on the ARC fleet: `curl | bash` took 69s
+        # or reset the connection outright, while an asset took 0.42s for 60MB — installers
+        # redirect to raw.githubusercontent.com, which rate-limits per IP, and every runner in
+        # a fan-out shares one NAT egress.
+        case "$RUNNER_OS" in
+          Linux) os=linux ;;
+          macOS) os=darwin ;;
+          *) echo "::error::gto-agent-sdk ships linux and darwin only, not $RUNNER_OS"; exit 1 ;;
+        esac
+        case "$RUNNER_ARCH" in
+          X64) arch=amd64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "::error::unsupported runner architecture $RUNNER_ARCH"; exit 1 ;;
+        esac
+        asset="gto-agent-sdk_${os}_${arch}.tar.gz"
+        mkdir -p "$SDK_DIR"
+        cd "$SDK_DIR"
+
+        if ! gh release download "gto-agent-sdk-v${VERSION}" \
+               --repo gto-wizard/gto-universe -p "$asset" -p checksums.txt --clobber 2>/tmp/dlerr; then
+          # The failure worth naming: gto-universe is private, so a token without Contents:read
+          # gets a 404 that is indistinguishable from a version that does not exist.
+          echo "::error::could not download gto-agent-sdk-v${VERSION} ($asset). If the token lacks Contents:read on gto-universe this reads as a missing release: $(cat /tmp/dlerr)"
+          exit 1
+        fi
+
+        # Verified, not trusted: this fetches an executable over the network and then runs it.
+        grep " ${asset}\$" checksums.txt > expected.txt
+        sha256sum -c expected.txt 2>/dev/null || shasum -a 256 -c expected.txt
+        tar -xzf "$asset"
+        echo "$SDK_DIR" >> "$GITHUB_PATH"
+        ./gto-claude --version
+        ./gto-opencode --version
+        {
+          echo "dir=$SDK_DIR"
+          echo "os=$os"
+          echo "arch=$arch"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Read the CLI versions this build pins
+      id: plan
+      shell: bash
+      env:
+        SDK_DIR: ${{ steps.sdk.outputs.dir }}
+        CLI_DIR: ${{ runner.temp }}/gto-agent-cli
+        OS: ${{ steps.sdk.outputs.os }}
+        ARCH: ${{ steps.sdk.outputs.arch }}
+      run: |
+        set -euo pipefail
+        # ASKED OF THE BINARY, never restated here. The pin is a property of the SDK build —
+        # it is what that build's event-stream parser was written against — so a version named
+        # in this file would be a second answer to one question, and the cache key would go on
+        # matching after the SDK moved, serving a stale CLI to a parser expecting a new one.
+        claude="$("$SDK_DIR/gto-claude" cli-version)"
+        opencode="$("$SDK_DIR/gto-opencode" cli-version)"
+        [ -n "$claude" ] && [ -n "$opencode" ] || {
+          echo "::error::the SDK did not report its pinned CLI versions (claude='$claude' opencode='$opencode')"; exit 1; }
+        {
+          echo "dir=$CLI_DIR"
+          echo "claude=$claude"
+          echo "opencode=$opencode"
+          echo "key=gto-agent-cli-${OS}-${ARCH}-claude${claude}-opencode${opencode}"
+        } >> "$GITHUB_OUTPUT"
+        echo "pinned CLIs: claude $claude · opencode $opencode"
+
+    # ONE entry holding both CLIs rather than one each: they are provisioned together and
+    # invalidated together, so two entries would be two round trips to say the same thing.
+    # No restore-keys — a partial match would hand back a DIFFERENT CLI version than the SDK
+    # pins, which is the exact drift the pinning exists to prevent. Miss and reinstall instead.
+    - name: Restore the agent CLIs
+      id: cli-cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # pin@v4.2.2
+      with:
+        path: ${{ steps.plan.outputs.dir }}
+        key: ${{ steps.plan.outputs.key }}
+
+    - name: Install the agent CLIs
+      shell: bash
+      env:
+        SDK_DIR: ${{ steps.sdk.outputs.dir }}
+        CLI_DIR: ${{ steps.plan.outputs.dir }}
+      run: |
+        set -euo pipefail
+        # Unconditional, because `ensure-cli` is itself the cache check: it returns the path
+        # untouched when the binary is already there. Gating this on cache-hit would put the
+        # same decision in two places, and the YAML copy would be the one that got it wrong.
+        "$SDK_DIR/gto-claude"   ensure-cli --dir "$CLI_DIR"
+        "$SDK_DIR/gto-opencode" ensure-cli --dir "$CLI_DIR"
+        echo "$CLI_DIR" >> "$GITHUB_PATH"
+
+    - name: Verify what landed
+      shell: bash
+      env:
+        CLI_DIR: ${{ steps.plan.outputs.dir }}
+        WANT_CLAUDE: ${{ steps.plan.outputs.claude }}
+        WANT_OPENCODE: ${{ steps.plan.outputs.opencode }}
+      run: |
+        set -euo pipefail
+        # A cache can hand back anything its key matched, and an installer's exit code is not
+        # proof it wrote what was asked for. The version the CLI REPORTS is the only thing that
+        # settles which build is about to review your code.
+        got_claude="$("$CLI_DIR/claude" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        got_opencode="$("$CLI_DIR/opencode" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        fail=0
+        [ "$got_claude" = "$WANT_CLAUDE" ] || { echo "::error::claude is $got_claude, expected $WANT_CLAUDE"; fail=1; }
+        [ "$got_opencode" = "$WANT_OPENCODE" ] || { echo "::error::opencode is $got_opencode, expected $WANT_OPENCODE"; fail=1; }
+        [ "$fail" = 0 ] || exit 1
+        echo "claude $got_claude · opencode $got_opencode"
